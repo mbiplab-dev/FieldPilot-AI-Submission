@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Env / secrets
+.env
+
+# Data & model artifacts (keep dirs via .gitkeep, ignore contents)
+data/*.db
+data/*.jsonl
+data/tts_cache/
+data/videos/*
+data/blueprints/*
+data/val_set/*
+models/*.pt
+models/*.tflite
+models/*.onnx
+models/*.yaml
+models/finetuned/
+!**/.gitkeep
+
+# Generated at runtime
+fieldpilot/alerts/earcons/*.wav
+
+# Local Claude settings
+.claude/settings.local.json
+
+# OS
+.DS_Store

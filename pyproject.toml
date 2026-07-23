@@ -1,0 +1,79 @@
+[project]
+name = "fieldpilot"
+version = "0.1.0"
+description = "Real-time multimodal edge-AI for construction-site safety, compliance, and reporting."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "Proprietary" }
+
+# --- Milestone 1 core: runs the edge safety loop with no cloud, no keys, no internet ---
+dependencies = [
+    "ultralytics>=8.3.0",     # YOLOv8-Pose + BoT-SORT tracker
+    "lap>=0.5.12",            # linear-assignment solver required by BoT-SORT
+    "torch>=2.3.0",           # CUDA wheels resolved automatically on Linux
+    "torchvision>=0.18.0",
+    "opencv-python>=4.9.0",   # video I/O, solvePnP, calibration, optional debug windows
+    "numpy>=1.26,<2.3",
+    "pyyaml>=6.0",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "rich>=13.7",             # structured console logging
+    "pyttsx3>=2.90",          # local (espeak-ng) TTS fallback — offline voice
+    "requests>=2.31",         # cloud TTS providers (no heavy SDK)
+    "fastapi>=0.110",         # web GUI: live feed + analysis dashboard
+    "uvicorn[standard]>=0.29",
+]
+
+[project.optional-dependencies]
+# Milestone 2 — streaming + edge export
+stream = [
+    "livekit>=0.17",
+    "livekit-agents>=0.11",
+]
+# Milestone 3 — backend, RAG, learning, dashboard
+server = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.1",
+    "redis>=5.0",
+    "qdrant-client>=1.9",
+    "websockets>=12.0",
+    "httpx>=0.27",
+]
+rag = [
+    "langchain>=0.2",
+    "langchain-community>=0.2",
+    "pypdf>=4.2",
+    "ollama>=0.2",
+]
+dev = [
+    "pytest>=8.1",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+fieldpilot = "fieldpilot.run:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["fieldpilot"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]  # line length handled by formatter; long config strings allowed

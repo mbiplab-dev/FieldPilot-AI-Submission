@@ -1,0 +1,105 @@
+# FieldPilot AI — global, version-controlled configuration.
+# Single source of truth for every tunable threshold. Nothing operational is hard-coded in logic.
+# Override any value with an env var FIELDPILOT_<SECTION>__<KEY> (double underscore = nesting).
+
+app:
+  name: FieldPilot AI
+  # advisory posture: this system assists workers; it is NOT an authoritative safety control.
+  posture: advisory
+  # EGO  = wearer's own state (IMU / device orientation)   [full support arrives with glasses]
+  # EXO  = workers observed in the camera view              [default with webcam/phone cam]
+  # BOTH = run exo detection + ego gaze fusion when an IMU source is available
+  perspective: EXO
+
+video:
+  source: webcam            # webcam | file | livekit
+  webcam_index: 0           # /dev/video0
+  file_path: data/videos/sample.mp4
+  target_fps: 30
+  # frames are resized for inference; keep aspect ratio via letterbox in the engine
+  infer_size: 640           # 640 for M1 realtime on RTX 3050; 1024 used for the LiveKit path in M2
+  queue_maxsize: 4          # bounded queue → drop-oldest under backpressure (never block capture)
+
+detection:
+  pose_model: models/yolo11m-pose.pt   # YOLO11-medium pose (~18ms on RTX 3050); n/s/m/l selectable
+  ppe_model: models/ppe_css.pt         # 10-class construction PPE detector (Hardhat/Vest + violations)
+  device: auto                         # auto | cuda:0 | cpu
+  conf_min: 0.35                       # bbox confidence minimum
+  iou: 0.5
+  keypoint_conf_min: 0.30              # per-keypoint visibility threshold
+  tracker: botsort                     # BoT-SORT for stable IDs across occlusions
+  track_buffer: 30                     # frames a lost track is retained (tune vs ID flicker)
+  match_thresh: 0.80                   # association threshold (tune vs ID flicker)
+
+fall_detection:
+  buffer_frames: 15                    # rolling window for velocity estimate (~0.5 s @ 30 fps)
+  # normalized vertical velocity (fraction of frame height per second) that flags a fall
+  velocity_thresh: 1.00
+  # a fall is non-linear & fast; kneeling/bending is slower & sustained-upright torso
+  torso_angle_thresh_deg: 50           # torso tilt from vertical beyond this supports a fall
+  min_confident_keypoints: 4           # need enough of shoulder/hip/ankle visible to judge
+  cooldown_s: 8                        # per-track suppression after a fall alert
+
+attention:
+  # cognitive-engagement state machine: Passive -> Unnoticed -> Escalated
+  dwell_ms: 600                        # contiguous gaze hold on hazard bbox to count as "noticed"
+  glance_ms: 200                       # gaze shorter than this is a glance, not engagement
+  unnoticed_after_ms: 2500             # hazard present & not dwelled -> Unnoticed
+  escalate_after_ms: 6000              # still Unnoticed this long -> Escalated
+  gaze_cone_deg: 25                    # head-forward cone counted as "looking at" the hazard
+
+alerts:
+  cooldown_s:                          # per-category minimum seconds between repeat alerts
+    fall: 6
+    ppe_missing: 20
+    unnoticed_hazard: 10
+    proximity: 8
+  earcons_dir: fieldpilot/alerts/earcons   # generated on first run if absent
+  tts:
+    provider: local                    # local | elevenlabs | google   (local = offline espeak-ng)
+    voice: en+m3                       # espeak-ng voice for the local fallback
+    rate_wpm: 175
+    cache_dir: data/tts_cache          # cloud phrases cached so repeats work offline
+    timeout_s: 3.0                     # cloud call budget; on timeout -> local fallback
+  haptics:
+    enabled: true
+    # severity -> vibration pattern (ms on/off) pushed to the paired mobile device
+    patterns:
+      low:      [120]
+      medium:   [200, 100, 200]
+      high:     [400, 120, 400, 120, 400]
+    mobile_endpoint: null              # POST target for the companion app; null → simulated/logged
+
+proximity:
+  # safety monitoring: flag a worker who gets too close to detected machinery/vehicles.
+  enabled: true
+  danger_distance_frac: 0.10           # gap < this fraction of the frame diagonal = "too close"
+
+compliance:
+  reference_object_mm: 88.9            # known width of the calibration reference (e.g., a card)
+  min_contour_area: 1000               # px² floor for reference detection
+  deviation_tolerance_mm: 5.0          # spec deviation beyond this triggers an RFI
+
+reasoning:
+  ollama_host: http://localhost:11434
+  llm_model: llama3.2:3b               # fits 6GB VRAM; configurable
+  embed_model: nomic-embed-text        # 768-dim embeddings via Ollama
+  qdrant_url: http://localhost:6333
+  qdrant_collection: blueprints
+  top_k: 5
+
+learning:
+  base_weights: models/yolov8n-pose.pt
+  val_set: data/val_set                # LOCKED, immutable validation dataset
+  output_dir: models/finetuned
+  epochs: 20
+  # measure-and-gate: only promote fine-tuned weights if mAP50 does not regress
+  promote_if_delta_gte: 0.0
+
+storage:
+  sqlite_path: data/fieldpilot.db      # local event store + offline store-and-forward queue
+  central_api: null                    # backend base URL; null → offline-only
+
+logging:
+  level: INFO
+  json_file: data/events.log.jsonl     # structured machine-readable event log
