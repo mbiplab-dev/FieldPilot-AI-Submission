@@ -159,6 +159,30 @@ def _run_demo_alert(cfg) -> int:
     return 0
 
 
+def _run_measure(cfg, image_path: str) -> int:
+    """Calibrate px→mm from a reference object in an image and report the ratio."""
+
+    import cv2
+
+    from fieldpilot.compliance.calibration import MeasurementCalibrator
+
+    img = cv2.imread(image_path)
+    if img is None:
+        log.error("cannot read image: %s", image_path)
+        return 1
+    cal = MeasurementCalibrator(cfg)
+    ref = cal.find_reference(img)
+    if ref is None:
+        log.error("no reference object found (need a bright rectangle ≥ min_contour_area)")
+        return 1
+    ratio = cal.calibrate(img)
+    diag_mm = (img.shape[1] ** 2 + img.shape[0] ** 2) ** 0.5 / ratio
+    log.info("reference long side = %.1f px @ %.1f mm  →  %.3f px/mm", ref.long_side_px,
+             cal.reference_mm, ratio)
+    log.info("frame spans ~%.0f mm diagonally at this scale", diag_mm)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="fieldpilot", description="FieldPilot AI edge safety loop")
     p.add_argument("--config", default="config.yaml", help="path to config.yaml")
@@ -176,6 +200,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="launch the web GUI (live annotated feed + analysis dashboard)")
     p.add_argument("--host", default="0.0.0.0", help="GUI bind host")
     p.add_argument("--port", type=int, default=8000, help="GUI port")
+    p.add_argument("--measure", metavar="IMAGE", default=None,
+                   help="calibrate px→mm from a reference object in IMAGE and report the ratio")
     return p
 
 
@@ -184,6 +210,8 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(args.config)
     setup_logging(cfg.get("logging.level", "INFO"))
     try:
+        if args.measure:
+            return _run_measure(cfg, args.measure)
         if args.gui:
             from fieldpilot.display.server import run_gui
 

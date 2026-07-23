@@ -35,7 +35,7 @@ opens (640×480); `ruff` clean; `pytest` 12/12 green.
 |---|------|--------|
 | 2.1 | `core`: LiveKit/WebRTC ingest, adaptive sampling, resize 1024², BGR→RGBA | ⬜ |
 | 2.2 | `models`: LiteRT/TFLite INT8 export + honest memory/latency benchmark | ⬜ |
-| 2.3 | `compliance.Calibration`: reference object → px/mm → Euclidean distance | ⬜ |
+| 2.3 | `compliance.Calibration`: reference object → px/mm → Euclidean distance | ✅ `--measure` |
 | 2.4 | `perspective`: full solvePnP→Rodrigues→Euler (exo) + IMU ego path | ⬜ |
 | 2.5 | `alerts`: finalized earcon set + Cloud TTS + haptic payload to mobile | ⬜ |
 
@@ -62,11 +62,27 @@ opens (640×480); `ruff` clean; `pytest` 12/12 green.
 **GUI verified:** page 200; live stats (person detected, ~30 fps, 8.6 ms infer); `/stream` served
 73 valid annotated JPEG frames in a 3 s sample; frames advance in real time.
 
+## Capability expansion (possibilities.md) ✅
+| # | Task | Status |
+|---|------|--------|
+| C.1 | Upgrade pose backbone → **YOLO11m-pose** (n/s/m/l selectable) | ✅ |
+| C.2 | **Real PPE detection** (10-class construction model) + violation alerts | ✅ |
+| C.3 | **Proximity / danger-zone** (worker near machinery/vehicle) | ✅ |
+| C.4 | **Equipment/vehicle** detection overlay | ✅ |
+| C.5 | Live **fall-risk meter** per worker + tuned thresholds | ✅ |
+| C.6 | `docs/possibilities-coverage.md` — full mapping of the 18 viso.ai apps | ✅ |
+
+**Verified live:** GUI fired `ppe_missing`, `unnoticed_hazard`, and `proximity` alerts on the webcam
+(hazards=42 in one sample; alerts 34–37 ms); YOLO11m 26 ms; ~16 fps combined pipeline.
+
 ## Changelog
 - **2026-07-23** — Project initialized; plan approved.
 - **2026-07-23** — **M0 + M1 complete.** Full offline edge safety loop runs on GPU: YOLOv8-Pose +
   BoT-SORT → fall / attention / PPE → earcon + TTS + haptic → SQLite. Latency ~40 ms (budget 500 ms).
   12 tests passing, lint clean.
 - **2026-07-23** — **Web GUI added** (`--gui`): live annotated feed (skeleton, torso tilt, gaze,
-  hazard banner) + real-time analysis dashboard + hazard event feed via FastAPI MJPEG. Next: M2
-  (LiveKit streaming, LiteRT export, OpenCV calibration).
+  hazard banner) + real-time analysis dashboard + hazard event feed via FastAPI MJPEG.
+- **2026-07-23** — **Capability expansion + M2 start.** Upgraded to YOLO11m-pose; added real PPE
+  detection, proximity/danger-zone, equipment overlay, fall-risk meter; measurement/calibration
+  (`--measure`). Mapped possibilities.md (18 apps) in docs. 19 tests passing. Git repo initialized;
+  committing per major change. Next: LiteRT INT8 export, LiveKit streaming, then M3 (RAG + learning).
