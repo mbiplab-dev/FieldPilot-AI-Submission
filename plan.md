@@ -40,6 +40,13 @@ audio (earcons + speech) and haptics. Supervisor feedback closes the loop and fi
 
 ## Architecture
 
+**The one rule: AI models never call notification/dashboard APIs directly.** Every model
+publishes a canonical event; everything observable flows from the engine chain:
+
+```
+Model → Event → Trigger Engine → Rules Engine → Notification → Dashboard
+```
+
 ```
 [Webcam / video file / (later) LiveKit stream]
         │  async frame producer → bounded queue
@@ -50,18 +57,35 @@ audio (earcons + speech) and haptics. Supervisor feedback closes the loop and fi
         ├─ [safety] AttentionStateMachine (Passive→Unnoticed→Escalated, 600ms dwell)
         │              gaze: solvePnP head-pose (exo) | IMU/orientation (ego)
         ▼
-[alerts] Dispatcher → Earcons + TTS(cloud→local fallback) + Haptics   (severity-scaled, cooldowns)
-        ▼
-[logging_] structured events → SQLite event store  (feeds offline + learning)
-        │
-        ├─ [compliance] Calibration / measurement (px→mm)
-        ├─ [reasoning]  RAG (Ollama emb + Qdrant must-filter) → RFI draft
-        ├─ [learning]   feedback → dataset → fine-tune → mAP50 delta gate
-        ├─ [alerts]     Redis pub/sub zone broadcast over WebSocket
-        ├─ [offline]    SQLite store-and-forward → reconciled flush
-        └─ [display]    FastAPI + HTMX supervisor dashboard
+[events.bridge] HazardEvent → canonical Event ──publish──▶ [events.bus]  (memory | Redis)
+                                                                │
+                                ┌───────────────────────────────┼───────────────────────────┐
+                                ▼                               ▼                           ▼
+                    [events.store] raw event log      [triggers.engine]          (other subscribers:
+                     PostgreSQL / SQLite               dedup 45 s · merge ·       learning loop,
+                                                     NEW/ACTIVE/RESOLVED/         analytics…)
+                                                     SUPPRESSED · auto-resolve
+                                                                │ alerts.new / .resolved
+                                                                ▼
+                                                     [rules.engine] DB-configurable rules
+                                                     IF conditions THEN create_alert /
+                                                     generate_rfi / request_inspection / notify
+                                                                │
+                                            ┌───────────────────┼───────────────────┐
+                                            ▼                   ▼                   ▼
+                                  [notifications.service]  [rfis] store      [inspections] store
+                                   dedup · retry · channels:
+                                   dashboard/sms/email/whatsapp/push
+                                                                │
+                                                                ▼
+                                        [backend.app] REST: /events /alerts /rules
+                                        /workers/{id}/timeline /notifications /rfis /inspections
 Infra (docker-compose): PostgreSQL · Redis · Qdrant · Ollama
 ```
+
+The offline M1 edge loop (earcons + TTS + haptics via `alerts.Dispatcher`) still works
+standalone (`--source webcam`); with `--bus` the same detections publish onto the event
+bus instead, and local dispatch becomes just another downstream consumer.
 
 ## Milestones
 
@@ -80,6 +104,7 @@ Infra (docker-compose): PostgreSQL · Redis · Qdrant · Ollama
 
 ```
 fieldpilot/{core,safety,compliance,alerts,reasoning,learning,display,logging_}/  perspective.py
+fieldpilot/{events,triggers,rules,notifications,backend}/
 config.yaml  pyproject.toml  docker-compose.yaml  .env.example
 data/{videos,blueprints,val_set}/   models/   docs/   tests/
 ```

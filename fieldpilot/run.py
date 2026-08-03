@@ -63,8 +63,38 @@ async def _run_pipeline(cfg, args) -> int:
     # validation runs unpaced (as-fast-as-possible) to stress the loop; live runs pace to fps.
     pace = not args.validate
     source = _build_source(cfg, kind, args.file, pace=pace, max_seconds=max_seconds)
-    pipeline = Pipeline(cfg, show=args.show)
-    summary = await pipeline.run(source, max_seconds=max_seconds)
+
+    bridge = None
+    bus = None
+    pipeline_holder: dict = {}
+    if getattr(args, "bus", False):
+        from fieldpilot.events.bridge import PipelineEventBridge
+        from fieldpilot.events.bus import create_bus
+
+        bus = create_bus(cfg.get("events.bus_backend", "memory"),
+                         cfg.get("events.redis_url", "redis://localhost:6379/0"))
+        await bus.start()
+        bridge = PipelineEventBridge(bus, camera_id=cfg.get("events.camera_id", "cam-edge-0"),
+                                     zone=cfg.get("events.zone"))
+
+        async def _on_control(topic: str, msg: dict) -> None:
+            if topic == "control.inspection":
+                p = pipeline_holder.get("pipeline")
+                if p is not None:
+                    actual = p.set_inspection(bool(msg.get("enabled")))
+                    log.info("control.inspection -> inspection mode %s", "ON" if actual else "OFF")
+
+        await bus.subscribe("control.inspection", _on_control)
+        log.info("event-driven mode: detections publish onto the %s bus",
+                 cfg.get("events.bus_backend", "memory"))
+
+    pipeline = Pipeline(cfg, show=args.show, event_bridge=bridge)
+    pipeline_holder["pipeline"] = pipeline
+    try:
+        summary = await pipeline.run(source, max_seconds=max_seconds)
+    finally:
+        if bus is not None:
+            await bus.stop()
 
     log.info("run summary:\n%s", json.dumps(summary, indent=2))
     if args.validate:
@@ -198,6 +228,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="play one sample alert per hazard category (test audio/haptics)")
     p.add_argument("--gui", action="store_true",
                    help="launch the web GUI (live annotated feed + analysis dashboard)")
+    p.add_argument("--backend", action="store_true",
+                   help="launch the event-driven backend (bus + triggers + rules + REST)")
+    p.add_argument("--bus", action="store_true",
+                   help="pipeline publishes events onto the bus instead of direct dispatch")
     p.add_argument("--host", default="0.0.0.0", help="GUI bind host")
     p.add_argument("--port", type=int, default=8000, help="GUI port")
     p.add_argument("--measure", metavar="IMAGE", default=None,
@@ -216,7 +250,12 @@ def main(argv: list[str] | None = None) -> int:
             from fieldpilot.display.server import run_gui
 
             return run_gui(config_path=args.config, source_kind=args.source,
-                           file_path=args.file, host=args.host, port=args.port)
+                           file_path=args.file, host=args.host, port=args.port,
+                           with_bus=getattr(args, "bus", False))
+        if args.backend:
+            from fieldpilot.backend.app import run_backend
+
+            return run_backend(config_path=args.config, host=args.host, port=args.port)
         if args.demo_alert:
             return _run_demo_alert(cfg)
         if args.bench:

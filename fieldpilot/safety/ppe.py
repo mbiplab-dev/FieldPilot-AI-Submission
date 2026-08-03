@@ -7,9 +7,19 @@ PPE_MISSING events; every PPE box is also exposed via `last_boxes` so the GUI ca
 (green) and violation (red) detections on the live feed.
 
 Pluggable: point `detection.ppe_model` at any YOLO PPE model, or set it null to disable cleanly.
+
+Failure is *loud*. A missing or unloadable weights file used to disable PPE silently, so a fresh
+clone shipped a safety loop with no hardhat/vest alerts and nothing said so. Now: "not configured"
+is an INFO (a legitimate choice), "configured but unloadable" is a WARNING naming the path, the
+cause, the remedy and the consequence, and `describe()` exposes that reason so a health endpoint
+can surface it. What has *not* changed is that PPE never takes down the safety loop — every failure
+is contained here and the rest of the pipeline keeps running.
 """
 
 from __future__ import annotations
+
+import os
+from pathlib import Path
 
 from fieldpilot.core.types import (
     FrameResult,
@@ -18,11 +28,22 @@ from fieldpilot.core.types import (
     PersonDetection,
     Severity,
 )
+from fieldpilot.logging_.logger import get_logger
+
+log = get_logger("fieldpilot.safety.ppe")
+
+_CONSEQUENCE = "PPE violation detection is DISABLED — no hardhat/vest alerts will fire"
+_REMEDY = (
+    "run `make fetch-models` to download a construction-PPE detector, or set "
+    "`detection.ppe_model: null` in config.yaml to disable PPE deliberately"
+)
 
 
 class PPEChecker:
     def __init__(self, cfg):
         self.enabled = False
+        self._model_path: str | None = None
+        self._reason: str | None = None
         self.cooldown_s = float(cfg.get("alerts.cooldown_s.ppe_missing", 20))
         self.conf_min = float(cfg.get("detection.conf_min", 0.35))
         self._model = None
@@ -34,19 +55,68 @@ class PPEChecker:
         model_path = cfg.get("detection.ppe_model")
         device = cfg.get("detection.device", "auto")
         if model_path:
-            self._load(model_path, device)
+            self._model_path = str(model_path)
+            self._load(self._model_path, device)
+        else:
+            # Not a misconfiguration: null is the documented way to run without PPE.
+            self._reason = f"detection.ppe_model is not configured — {_CONSEQUENCE}"
+            log.info("PPE checker off: %s", self._reason)
+
+    # -- status ----------------------------------------------------------------
+
+    @property
+    def status(self) -> dict[str, object]:
+        """Read-only snapshot of why PPE is on or off, for /health-style reporting."""
+
+        return {"enabled": self.enabled, "model": self._model_path, "reason": self._reason}
+
+    def describe(self) -> dict[str, object]:
+        """Alias of `status`; returns a fresh dict, so callers cannot mutate our state."""
+
+        return self.status
+
+    # -- loading ---------------------------------------------------------------
+
+    def _disable(self, model_path: str, cause: str) -> None:
+        """Record + shout the reason PPE is off. Never raises."""
+
+        self._model = None
+        self.enabled = False
+        self._reason = f"PPE model {model_path!r} {cause}. Remedy: {_REMEDY}. {_CONSEQUENCE}."
+        log.warning(
+            "PPE detector unavailable\n"
+            "  tried path : %s\n"
+            "  cause      : %s\n"
+            "  remedy     : %s\n"
+            "  consequence: %s.",
+            model_path, cause, _REMEDY, _CONSEQUENCE,
+        )
 
     def _load(self, model_path: str, device: str) -> None:
+        # A bare model name (e.g. "yolov8n.pt") is a valid ultralytics auto-download reference, so
+        # only a path-shaped reference can be judged "missing" before we hand it to ultralytics.
+        looks_like_path = os.sep in model_path or "/" in model_path
+        if looks_like_path and not Path(model_path).is_file():
+            self._disable(model_path, "does not exist (no such file)")
+            return
         try:
             from ultralytics import YOLO
 
-            self._model = YOLO(model_path)
-            self._device = None if device == "auto" else device
-            self._names = dict(self._model.names)
-            self.enabled = True
-        except Exception:  # noqa: BLE001 — PPE is optional; never take down the safety loop.
-            self._model = None
-            self.enabled = False
+            model = YOLO(model_path)
+            names = dict(model.names)
+        except Exception as exc:  # noqa: BLE001 — PPE is optional; never take down the safety loop.
+            self._disable(model_path, f"exists but failed to load ({type(exc).__name__}: {exc})")
+            return
+
+        self._model = model
+        self._device = None if device == "auto" else device
+        self._names = names
+        self.enabled = True
+        self._reason = None
+        log.info(
+            "PPE detector loaded: %s (%d classes: %s)",
+            model_path, len(names), ", ".join(sorted(names.values())),
+        )
 
     @staticmethod
     def _categorize(name: str) -> tuple[str | None, bool]:

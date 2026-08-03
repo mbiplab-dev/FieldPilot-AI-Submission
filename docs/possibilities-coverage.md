@@ -13,12 +13,12 @@ maps each to what FieldPilot actually does today, honestly. Legend: ✅ done · 
 | 5 | Ergonomic risk assessment (pose) | ◑ | Full 17-pt pose live; sustained-posture ergonomic scoring is a small future add. |
 | 6 | Process tracking — safety-protocol-break detection | ◑ | Breaks = falls / PPE / proximity (done). Schedule/progress tracking future. |
 | 7 | Measure distances & volume | ✅ (dist) | `compliance/calibration.py` — px→mm + spec-deviation. `--measure IMAGE`. Volume needs depth. |
-| 8 | Automatic construction zone detection | ◑ | Zones modelled in config (for broadcast); auto-detecting zones from imagery is future. |
-| 9 | Automated inspection | ◑ | PPE inspection done; general asset/vehicle inspection future. |
+| 8 | Automatic construction zone detection | ◑ | Zones are now a relational registry (`zones/service.py`, `/zones` CRUD) with hazard level + danger flag, driving rule context, WebSocket routing and blueprint filtering. Auto-*detecting* zones from imagery is still future. |
+| 9 | Automated inspection | ◑ | PPE + structural-damage inspection done, with a request→complete lifecycle (`/inspections/{id}/complete`). General asset/vehicle inspection future. |
 | 10 | Dangerous-goods sign recognition | ⛔ | Feasible: plug a sign detector into the same `ppe_model` slot pattern. |
 | 11 | Construction vehicle ID (ANPR / plates) | ⛔ | Feasible: add a plate detector + OCR stage. |
 | 12 | Automated quality control (material defects) | ⛔ | Needs a defect/anomaly model + dataset. |
-| 13 | Structural defect detection (cracks, corrosion) | ⛔ | Needs a crack/corrosion segmentation model. |
+| 13 | Structural defect detection (cracks, corrosion) | ✅ (cracks) | `inspection/detector.py` runs the fine-tuned `structural_damage_best.pt` (Minor/Moderate/Severe) as a runtime-toggleable detector → `crack` events → rules → inspection requests. Corrosion would need its own weights. |
 | 14 | Material management (classify, quantify) | ⛔ | Needs a materials classifier. |
 | 15 | Read analog dials / gauges | ⛔ | Needs a gauge model + reading head. |
 | 16 | Asset management & maintenance | ⛔ | Needs an asset registry + condition model. |

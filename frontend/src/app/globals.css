@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+/* class-based dark mode (toggled on <html>) */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+/*
+ * Design tokens — restrained professional palette.
+ * Neutrals carry the UI; color is reserved for INDICATIONS
+ * (severity, alert state, live status). One blue accent for interactivity.
+ */
+:root {
+  --bg: #f4f5f7;
+  --bg-soft: #eceef1;
+  --panel: #ffffff;
+  --panel-2: #f8f9fb;
+  --line: #e2e5ea;
+  --line-soft: #eceef2;
+  --txt: #182230;
+  --txt-2: #5b6676;
+  --txt-3: #8b94a3;
+  --accent: #2f6fdd;
+}
+
+.dark {
+  --bg: #0b0e13;
+  --bg-soft: #10141b;
+  --panel: #131822;
+  --panel-2: #18202c;
+  --line: #232b38;
+  --line-soft: #1c2430;
+  --txt: #e8ebf0;
+  --txt-2: #9aa4b5;
+  --txt-3: #667085;
+  --accent: #5b9dff;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-soft: var(--bg-soft);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-line: var(--line);
+  --color-line-soft: var(--line-soft);
+  --color-txt: var(--txt);
+  --color-txt-2: var(--txt-2);
+  --color-txt-3: var(--txt-3);
+  --color-accent: var(--accent);
+}
+
+body {
+  background: var(--bg);
+  color: var(--txt);
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 99px;
+}

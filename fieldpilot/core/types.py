@@ -47,6 +47,7 @@ class HazardType(StrEnum):
     PPE_MISSING = "ppe_missing"
     UNNOTICED_HAZARD = "unnoticed_hazard"
     PROXIMITY = "proximity"
+    CRACK = "crack"  # structural defect from the inspection detector
 
 
 class Severity(StrEnum):

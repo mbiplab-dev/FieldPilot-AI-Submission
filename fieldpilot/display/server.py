@@ -25,6 +25,32 @@ from fieldpilot.logging_.logger import get_logger, setup_logging
 log = get_logger("fieldpilot.gui")
 
 
+class _ForwardingBridge:
+    """Wraps the bus bridge so every event is also queued for the central API.
+
+    The bus carries events to a backend on the same network; the outbox is what survives that
+    network going away. Enqueue happens even if the bus publish fails, because the durable copy
+    is the one that guarantees the event is not lost.
+    """
+
+    def __init__(self, inner, forwarder) -> None:
+        self._inner = inner
+        self._forwarder = forwarder
+
+    async def emit(self, hazard):
+        try:
+            event = await self._inner.emit(hazard)
+        except Exception:  # noqa: BLE001 — bus down must not stop the durable path
+            log.exception("bus publish failed — event still queued for store-and-forward")
+            from fieldpilot.events.bridge import hazard_to_event
+
+            event = hazard_to_event(
+                hazard, camera_id=self._inner.camera_id, zone=self._inner.zone
+            )
+        await self._forwarder.submit(event.model_dump_json_safe())
+        return event
+
+
 def _build_source(cfg: Config, kind: str | None, file_path: str | None) -> VideoSource:
     v = cfg.section("video")
     return VideoSource(
@@ -37,13 +63,62 @@ def _build_source(cfg: Config, kind: str | None, file_path: str | None) -> Video
     )
 
 
-def create_app(cfg: Config, source_kind: str | None = None, file_path: str | None = None) -> FastAPI:
+def create_app(cfg: Config, source_kind: str | None = None, file_path: str | None = None,
+               with_bus: bool = False) -> FastAPI:
     state = LiveState()
+
+    forward_holder: dict = {}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         source = _build_source(cfg, source_kind, file_path)
-        pipeline = Pipeline(cfg, sink=state)
+        bus = None
+        bridge = None
+        docs = None
+        forwarder = None
+        pipeline_holder: dict = {}
+
+        # Offline store-and-forward: when a central API is configured, every event the edge
+        # produces is written to a local SQLite outbox and forwarded with retry. Site Wi-Fi
+        # dropping must not lose hazards, so this is durable-first, network-second.
+        central_api = cfg.get("storage.central_api")
+        if central_api:
+            from fieldpilot.offline import OUTBOX_TABLE, Outbox, StoreAndForward
+            from fieldpilot.storage import DocStore
+
+            docs = DocStore("sqlite", str(cfg.get("storage.sqlite_path", "data/fieldpilot.db")))
+            await docs.start([OUTBOX_TABLE])
+            forwarder = StoreAndForward(Outbox(docs), central_api=str(central_api))
+            await forwarder.start()
+            forward_holder["forwarder"] = forwarder
+            log.info("store-and-forward enabled → %s", central_api)
+
+        if with_bus:
+            from fieldpilot.events.bridge import PipelineEventBridge
+            from fieldpilot.events.bus import create_bus
+
+            bus = create_bus(cfg.get("events.bus_backend", "memory"),
+                             cfg.get("events.redis_url", "redis://localhost:6379/0"))
+            await bus.start()
+            bridge = PipelineEventBridge(bus, camera_id=cfg.get("events.camera_id", "cam-edge-0"),
+                                         zone=cfg.get("events.zone"))
+            if forwarder is not None:
+                bridge = _ForwardingBridge(bridge, forwarder)
+
+            async def _on_control(topic: str, msg: dict) -> None:
+                if topic == "control.inspection":
+                    p = pipeline_holder.get("pipeline")
+                    if p is not None:
+                        actual = p.set_inspection(bool(msg.get("enabled")))
+                        log.info("control.inspection -> inspection mode %s",
+                                 "ON" if actual else "OFF")
+
+            await bus.subscribe("control.inspection", _on_control)
+            log.info("GUI in bus mode — detections publish to %s",
+                     cfg.get("events.bus_backend", "memory"))
+
+        pipeline = Pipeline(cfg, sink=state, event_bridge=bridge)
+        pipeline_holder["pipeline"] = pipeline
         task = asyncio.create_task(pipeline.run(source))
         log.info("GUI pipeline started — open http://localhost:8000")
         try:
@@ -56,6 +131,12 @@ def create_app(cfg: Config, source_kind: str | None = None, file_path: str | Non
                 await task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
+            if forwarder is not None:
+                await forwarder.stop()
+            if docs is not None:
+                await docs.stop()
+            if bus is not None:
+                await bus.stop()
 
     app = FastAPI(title="FieldPilot AI", lifespan=lifespan)
 
@@ -79,16 +160,38 @@ def create_app(cfg: Config, source_kind: str | None = None, file_path: str | Non
 
         return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
+    @app.get("/offline/status")
+    async def offline_status() -> JSONResponse:
+        """Queue depth and connectivity for the store-and-forward path."""
+
+        forwarder = forward_holder.get("forwarder")
+        if forwarder is None:
+            return JSONResponse({
+                "enabled": False,
+                "reason": "storage.central_api is not configured — edge runs offline-only",
+            })
+        return JSONResponse({"enabled": True, **await forwarder.status()})
+
+    @app.post("/offline/flush")
+    async def offline_flush() -> JSONResponse:
+        """Force a drain attempt (the flusher also runs on its own schedule)."""
+
+        forwarder = forward_holder.get("forwarder")
+        if forwarder is None:
+            return JSONResponse({"enabled": False, "sent": 0, "failed": 0})
+        return JSONResponse({"enabled": True, **await forwarder.flush_once()})
+
     return app
 
 
 def run_gui(config_path: str = "config.yaml", source_kind: str | None = None,
-            file_path: str | None = None, host: str = "0.0.0.0", port: int = 8000) -> int:
+            file_path: str | None = None, host: str = "0.0.0.0", port: int = 8000,
+            with_bus: bool = False) -> int:
     import uvicorn
 
     cfg = load_config(config_path)
     setup_logging(cfg.get("logging.level", "INFO"))
-    app = create_app(cfg, source_kind, file_path)
+    app = create_app(cfg, source_kind, file_path, with_bus=with_bus)
     uvicorn.run(app, host=host, port=port, log_level="warning")
     return 0
 

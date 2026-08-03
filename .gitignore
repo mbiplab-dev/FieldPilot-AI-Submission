@@ -16,9 +16,15 @@ data/tts_cache/
 data/videos/*
 data/blueprints/*
 data/val_set/*
+# alert snapshots the edge captures and the backend serves at /images/<id>.jpg — these are
+# uploaded site imagery: unbounded in size and potentially identifying, so never committed.
+data/alerts/
 models/*.pt
 models/*.tflite
 models/*.onnx
+# ultralytics drops auto-downloaded weights into the CWD — never commit those either
+/*.pt
+/*.onnx
 models/*.yaml
 models/finetuned/
 !**/.gitkeep
@@ -28,6 +34,15 @@ fieldpilot/alerts/earcons/*.wav
 
 # Local Claude settings
 .claude/settings.local.json
+
+# Node / Next.js
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/next-env.d.ts
+
+# Runtime logs
+data/logs/
 
 # OS
 .DS_Store

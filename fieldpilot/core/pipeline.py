@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
+from pathlib import Path
 from statistics import median
 
 from fieldpilot.alerts.dispatcher import AlertDispatcher
@@ -18,6 +19,7 @@ from fieldpilot.core.config import Config
 from fieldpilot.core.types import HazardEvent, HazardType
 from fieldpilot.core.video_source import VideoSource
 from fieldpilot.core.vision_engine import VisionEngine
+from fieldpilot.inspection.detector import InspectionDetector
 from fieldpilot.logging_.logger import get_logger, jsonl_append
 from fieldpilot.logging_.store import EventStore
 from fieldpilot.perspective import GazeEstimator
@@ -66,14 +68,18 @@ class ActiveHazardRegistry:
 
 
 class Pipeline:
-    def __init__(self, cfg: Config, *, show: bool = False, sink=None):
+    def __init__(self, cfg: Config, *, show: bool = False, sink=None, event_bridge=None):
         self.cfg = cfg
         self.show = show
         self.sink = sink  # optional LiveState for the web GUI
+        # when set, HazardEvents are published onto the platform event bus (via the bridge)
+        # instead of going straight to the dispatcher — models never call APIs directly.
+        self.event_bridge = event_bridge
         self.store = EventStore(cfg.get("storage.sqlite_path", "data/fieldpilot.db"))
         self.engine = VisionEngine(cfg)
         self.fall = FallDetector(cfg)
         self.ppe = PPEChecker(cfg)
+        self.inspection = InspectionDetector(cfg)
         self.proximity = ProximityDetector(cfg)
         self.attention = AttentionTracker(cfg)
         self.gaze = GazeEstimator(cfg)
@@ -95,10 +101,49 @@ class Pipeline:
         self._quit = False
         self._frame_size_set = False
 
+    def set_inspection(self, enabled: bool) -> bool:
+        """Toggle inspection mode (called from the bus control channel). Returns actual."""
+
+        return self.inspection.set_enabled(enabled)
+
+    _ALERT_SHOTS_DIR = "data/alerts"
+    _SEV_COLOR = {"high": (60, 60, 235), "medium": (40, 200, 235), "low": (80, 220, 80)}
+
+    def _save_alert_image(self, event, frame_img) -> None:
+        """Snapshot the flagged region (bbox + label) for the LLM + dashboard card."""
+
+        if self.event_bridge is None:
+            return
+        import cv2  # noqa: PLC0415
+
+        try:
+            import os
+
+            os.makedirs(self._ALERT_SHOTS_DIR, exist_ok=True)
+            out = frame_img.copy()
+            color = self._SEV_COLOR.get(event.severity.value, (60, 60, 235))
+            if event.bbox is not None:
+                x1, y1, x2, y2 = (int(v) for v in event.bbox)
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(out.shape[1], x2), min(out.shape[0], y2)
+                cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
+                _label(out, f"{event.hazard_type.value}", (x1, max(14, y1 - 6)), color)
+            # light HUD so the snapshot is self-describing even without the bbox
+            cv2.putText(out, f"{event.hazard_type.value} · {event.severity.value}",
+                        (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (240, 240, 240), 1, cv2.LINE_AA)
+            ok, buf = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if ok:
+                fname = f"{event.id}.jpg"
+                (Path(self._ALERT_SHOTS_DIR) / fname).write_bytes(buf.tobytes())
+                event.meta["image_url"] = f"/img/{fname}"
+        except Exception:  # noqa: BLE001 — image capture is best-effort, never fatal
+            pass
+
     def _process(self, result) -> list[HazardEvent]:
         primary: list[HazardEvent] = []
         primary.extend(self.fall.update(result))
         primary.extend(self.ppe.update(result))  # also fills self.ppe.equipment_boxes
+        primary.extend(self.inspection.update(result))
         primary.extend(self.proximity.update(result, self.ppe.equipment_boxes))
         for ev in primary:
             if ev.hazard_type in _ACK_REQUIRED:
@@ -132,13 +177,24 @@ class Pipeline:
                     self.hazard_count += 1
                     self._type_counts[event.category()] = self._type_counts.get(event.category(), 0) + 1
                     self.store.record_event(event, alerted=True)
-                    record = self.dispatcher.dispatch(event)
+                    if self.event_bridge is not None:
+                        # event-driven mode: capture an annotated snapshot of the flagged
+                        # region for the LLM verifier + the dashboard alert card, then publish.
+                        self._save_alert_image(event, result.frame.image)
+                        # event-driven mode: publish to the bus; alerting/notifications are
+                        # downstream consumers (trigger engine → rules → notification service).
+                        await self.event_bridge.emit(event)
+                        record = None
+                    else:
+                        # offline M1 mode: direct local earcon/TTS/haptic dispatch.
+                        record = self.dispatcher.dispatch(event)
                     jsonl_append(self.jsonl_path, {
                         "event": event,
-                        "admitted": record.admitted,
-                        "latency_ms": round(record.latency_ms, 1),
+                        "admitted": record.admitted if record else None,
+                        "latency_ms": round(record.latency_ms, 1) if record else None,
+                        "routed": "bus" if self.event_bridge is not None else "dispatcher",
                     })
-                    if record.admitted:
+                    if record is not None and record.admitted:
                         self.latencies.append(record.latency_ms)
                     if self.sink is not None:
                         self.sink.add_event({
@@ -146,7 +202,8 @@ class Pipeline:
                             "severity": event.severity.value,
                             "message": event.message,
                             "track_id": event.track_id,
-                            "latency_ms": round(record.latency_ms, 1) if record.admitted else None,
+                            "latency_ms": (round(record.latency_ms, 1)
+                                           if record is not None and record.admitted else None),
                             "ts_wall": event.ts_wall,
                         })
 
@@ -154,7 +211,8 @@ class Pipeline:
                 live = self._live_stats()
                 if self.sink is not None:
                     annotated = annotate(result, self._active, self.gaze, self.kp_conf, live,
-                                         self.ppe.last_boxes, self.fall.risk, self.ppe.equipment_boxes)
+                                         self.ppe.last_boxes, self.fall.risk, self.ppe.equipment_boxes,
+                                         self.inspection.last_boxes)
                     self.sink.update_frame(encode_jpeg(annotated), live)
                 if self.show:
                     self._preview(result, live)
@@ -202,7 +260,8 @@ class Pipeline:
             import cv2
 
             img = annotate(result, self._active, self.gaze, self.kp_conf, live,
-                           self.ppe.last_boxes, self.fall.risk, self.ppe.equipment_boxes)
+                           self.ppe.last_boxes, self.fall.risk, self.ppe.equipment_boxes,
+                           self.inspection.last_boxes)
             cv2.imshow("FieldPilot AI", img)
             if (cv2.waitKey(1) & 0xFF) == ord("q"):
                 self._quit = True
@@ -253,7 +312,7 @@ def _risk_color(risk: float):
 
 
 def annotate(result, active, gaze, kp_conf: float, stats: dict, ppe_boxes=None, fall_risk=None,
-             equipment_boxes=None):
+             equipment_boxes=None, inspection_boxes=None):
     """Draw skeleton, boxes, torso tilt, fall-risk meter, PPE, equipment, gaze tags, HUD, banner."""
 
     import cv2
@@ -318,6 +377,14 @@ def annotate(result, active, gaze, kp_conf: float, stats: dict, ppe_boxes=None, 
         ex1, ey1, ex2, ey2 = (int(v) for v in eq["bbox"])
         cv2.rectangle(img, (ex1, ey1), (ex2, ey2), (0, 140, 255), 2)
         _label(img, eq["kind"], (ex1, max(12, ey1 - 4)), (0, 140, 255))
+
+    # structural defects — inspection mode (purple, severity-coded label)
+    for box in (inspection_boxes or []):
+        bx1, by1, bx2, by2 = (int(v) for v in box["bbox"])
+        sev = box.get("severity_score", 0.0)
+        c = (200, 60, 220) if sev <= 0.85 else (60, 60, 235)
+        cv2.rectangle(img, (bx1, by1), (bx2, by2), c, 2)
+        _label(img, box["label"], (bx1, max(12, by1 - 4)), c)
 
     # HUD panel (top-left)
     lines = [

@@ -75,6 +75,15 @@ proximity:
   enabled: true
   danger_distance_frac: 0.10           # gap < this fraction of the frame diagonal = "too close"
 
+inspection:
+  # structural-damage AI (fine-tuned YOLO: Minor/Moderate/Severe rotation).
+  # OFF by default — toggled at runtime from the dashboard via POST /control/inspection
+  # (flows over the bus as control.inspection to the edge).
+  enabled: false
+  model: models/structural_damage_best.pt
+  conf_min: 0.40
+  frame_skip: 5                        # run the damage model every Nth frame
+
 compliance:
   reference_object_mm: 88.9            # known width of the calibration reference (e.g., a card)
   min_contour_area: 1000               # px² floor for reference detection
@@ -87,18 +96,67 @@ reasoning:
   qdrant_url: http://localhost:6333
   qdrant_collection: blueprints
   top_k: 5
+  # every retrieval is `must`-filtered on this project id, so one site's specs can never be
+  # cited for another's. Blueprint files encode project/zone/category in their filename:
+  #   <project>__<zone>__<category>__<title>.pdf   (zone `all` = project-wide)
+  project_id: riverside
+  blueprints_dir: data/blueprints
 
 learning:
-  base_weights: models/yolov8n-pose.pt
+  # Feedback labels describe PPE/defect detections, so the fine-tune base is the PPE detector,
+  # not the pose model (pose has no PPE classes to correct).
+  base_weights: models/ppe_css.pt
   val_set: data/val_set                # LOCKED, immutable validation dataset
   output_dir: models/finetuned
   epochs: 20
   # measure-and-gate: only promote fine-tuned weights if mAP50 does not regress
   promote_if_delta_gte: 0.0
+  min_samples: 8                       # refuse to train on a statistically meaningless batch
 
 storage:
   sqlite_path: data/fieldpilot.db      # local event store + offline store-and-forward queue
   central_api: null                    # backend base URL; null → offline-only
+
+# --- Event-driven platform (Model → Event → Rules → Notification → Dashboard) --------------
+events:
+  backend: sqlite                      # sqlite | postgres  (durable event + platform store)
+  database_url: data/platform.db       # postgres: postgresql+psycopg://fieldpilot:fieldpilot@localhost:5432/fieldpilot
+  events_db_url: data/events.db        # raw canonical-event log (same backend family)
+  bus_backend: memory                  # memory | redis
+  redis_url: redis://localhost:6379/0
+  camera_id: cam-edge-0                # identity this edge device stamps on events
+  # Zone tag stamped on every event from this device. Leaving it null disables everything
+  # zone-scoped for live detections — cross-worker advisories, zone-filtered blueprint
+  # retrieval, and the danger-zone rule condition — so a single-camera install should name
+  # the zone the camera actually watches.
+  zone: zone-a
+
+triggers:
+  dedup_window_s: 45                   # same issue re-detected within this window → suppressed
+  resolve_after_s: 90                  # no detection for this long → auto-resolve the alert
+  sweep_interval_s: 5                  # how often the auto-resolve sweeper runs
+  cache_ttl_s: 21600                   # how long tracked alerts stay hot in the cache
+
+notifications:
+  dedup_window_s: 300                  # same subject on same channel merges within 5 min
+
+llm:
+  # every alert hops through this local LLM for a verdict before notifying.
+  # fail-open: if Ollama/the model is unavailable, alerts auto-confirm.
+  enabled: false                       # set true to gate alerts on the LLM
+  ollama_host: http://localhost:11434
+  model: llama3.2:3b                   # small, locally runnable; or moondream / llava:7b for vision
+  vision: false                        # true → attach the captured bbox image to the prompt
+  timeout_s: 12.0
+  # The LLM is NOISE CONTROL, not a safety authority. Two guards, both from measured behaviour:
+  #   * With `vision: false` it can suppress NOTHING — a text-only model rejected 14 of 19
+  #     alerts citing "no clear visual evidence in the bounding box" for a frame it never saw.
+  #   * Even with vision, it may only suppress up to this severity. llama3.2:3b was measured
+  #     rejecting a 0.97-confidence fall ("worker collapsed and is motionless") as "low
+  #     detector confidence".
+  # Anything it rejects above the ceiling is escalated anyway and tagged `llm_disputed` for a
+  # human to judge. Raise this only with a model you have actually validated on your footage.
+  suppress_max_severity: medium        # low | medium | high | critical
 
 logging:
   level: INFO
