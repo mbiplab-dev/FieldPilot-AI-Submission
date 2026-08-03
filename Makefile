@@ -16,6 +16,9 @@ COMPOSE       ?= $(DOCKER) compose
         backend edge edge-synthetic gui frontend frontend-build frontend-install \
         run-all stop-all \
         inspect-on inspect-off inspect-status demo-events \
+        llm-pull llm-on \
+        ingest-blueprints blueprints-status blueprints-search \
+        train learning-runs feedback-stats models zones rfis \
         test test-frontend lint lint-frontend validate bench demo-alert measure clean
 
 # ------------------------------------------------------------------ setup
@@ -130,6 +133,9 @@ learning-runs: ## Show fine-tune history with the measured mAP50 delta per run
 
 feedback-stats: ## Show supervisor approve/reject counts feeding the learning loop
 	curl -s http://localhost:$(BACKEND_PORT)/feedback/stats && echo
+
+models: ## List the detector registry (downloaded / licence / capability)
+	@curl -s http://localhost:$(BACKEND_PORT)/models | python3 -c "import sys,json; d=json.load(sys.stdin); print(f\"selected: {d['selected']}\"); [print(f\"  {m['key']:<22} {m['capability']:<7} {str(m.get('license')):<14} downloaded={m['downloaded']}\") for m in d['models']]"
 
 zones: ## List the site zone registry
 	curl -s http://localhost:$(BACKEND_PORT)/zones && echo
