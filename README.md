@@ -95,14 +95,56 @@ when the issue disappears, and lets operators SUPPRESS noise. Rules are stored i
 database and edited via REST — e.g. *no helmet AND in danger zone → critical alert*;
 *crack severity > 0.85 → immediate inspection*; *rebar deviation > 20 mm → generate RFI*.
 
+## Cameras: server-side or browser-side
+
+Two ingest paths run the *same* pipeline, so hazards from either reach the event bus identically:
+
+```bash
+# a camera attached to the server (or a file / synthetic frames)
+make edge                                    # reads /dev/video0
+
+# the camera attached to the operator's own browser — no server camera needed
+# open the dashboard's Camera page, or the zero-build fallback at:
+#   http://localhost:8000/camera
+```
+
+Browser capture needs a secure context: it works on `localhost`, and needs HTTPS anywhere else.
+
+## Detector models
+
+The registry ships several verified public PPE checkpoints. Each is pinned to a git revision **and**
+a SHA-256, is checksum-verified on download, and declares its licence:
+
+```bash
+make models                    # list the registry (downloaded / licence / capability)
+curl -X POST localhost:8100/models/select -H 'Content-Type: application/json' \
+     -d '{"model_key":"ppe_helmet_vest_n"}'
+```
+
+PPE checks cover helmet, vest, gloves, boots and goggles, with dataset label aliases normalised so
+differently-named checkpoints work unchanged. Selecting a **person-only** detector (e.g. `yolo26n`)
+automatically pauses PPE alerting — such a model cannot evidence a missing helmet, so raising one
+would be fabricated. Individual items can be switched off per site:
+
+```bash
+curl -X POST localhost:8100/config/tracked-items -H 'Content-Type: application/json' \
+     -d '{"item_name":"goggles","enabled":false}'
+```
+
 ## Configuration
 
 Everything tunable lives in [`config.yaml`](./config.yaml). Any value can be overridden with an env
 var of the form `FIELDPILOT_<SECTION>__<KEY>` (double underscore denotes nesting), e.g.
 `FIELDPILOT_APP__PERSPECTIVE=BOTH`.
 
-## Later milestones
+Settings a site manager changes at runtime (tracked PPE items, confidence threshold, pose on/off,
+selected detector) are persisted and **override** the YAML defaults, so a restart does not revert
+the site's configuration. See `GET /config`.
 
-- **M2** — LiveKit streaming ingest, LiteRT INT8 edge export, OpenCV measurement/calibration.
-- **M3** — `docker compose up -d` brings up PostgreSQL, Redis, Qdrant, Ollama for the feedback
-  learning loop, blueprint RAG, RFI drafting, cross-worker broadcast, and the HTMX dashboard.
+## Not yet built
+
+Deferred until the Ray-Ban hardware is available, and marked as not-started rather than stubbed:
+LiveKit/WebRTC ingest, LiteRT INT8 export, the IMU ego-perspective path, and the battery-drain
+harness. See [`tracking.md`](./tracking.md) for the current state of every milestone, and
+[`docs/branch-integration.md`](./docs/branch-integration.md) for what was ported from the `hrm`
+branch.

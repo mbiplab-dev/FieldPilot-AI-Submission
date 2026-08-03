@@ -70,6 +70,17 @@ alerts:
       high:     [400, 120, 400, 120, 400]
     mobile_endpoint: null              # POST target for the companion app; null → simulated/logged
 
+safety:
+  # PPE items checked independently. These are BOOT DEFAULTS — a site manager can toggle each
+  # one at runtime (POST /config/tracked-items) and that choice persists, overriding this.
+  # An item is only ever enforced if the loaded detector actually has classes for it.
+  tracked_items:
+    helmet: true
+    vest: true
+    gloves: false                      # most public PPE checkpoints detect these poorly; opt in
+    boots: false
+    goggles: false
+
 proximity:
   # safety monitoring: flag a worker who gets too close to detected machinery/vehicles.
   enabled: true

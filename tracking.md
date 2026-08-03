@@ -2,7 +2,7 @@
 
 Status legend: ✅ done · 🚧 in progress · ⬜ not started · ⛔ blocked
 
-Last updated: 2026-07-30
+Last updated: 2026-08-03
 
 ## Milestone 0 — Scaffold & deliverables ✅
 | # | Task | Status |
@@ -207,3 +207,39 @@ notification; measurement event (rebar 27.5 mm) → RFI auto-generated; 500 dup/
   an LLM gate that was silently suppressing critical hazards. 293 tests, ruff + eslint + tsc clean.
   Still deliberately deferred to the glasses: LiveKit ingest, LiteRT INT8 export, the IMU ego
   path, and the battery-drain harness.
+
+## `hrm` branch integration (2026-08-03)
+`origin/hrm` is an unrelated history (no merge base) — a 3-file self-contained browser-webcam app.
+Its capabilities were ported into this architecture rather than carried as a second app; see
+[`docs/branch-integration.md`](./docs/branch-integration.md) for the full accounting.
+
+| # | Ported capability | Status |
+|---|---|---|
+| H.1 | `models_registry`: 4 pinned public PPE checkpoints + person models + custom slot, SHA-256-verified atomic download, licence/size metadata | ✅ 9 entries, digests re-verified against upstream LFS |
+| H.2 | Label normalisation (`CLASS_ALIASES`) so any PPE dataset's spelling works | ✅ |
+| H.3 | Five-item PPE vocabulary — helmet, vest, gloves, boots, goggles | ✅ |
+| H.4 | **Person-only-model guard** — PPE alerting is suppressed when the loaded model has no PPE classes | ✅ closes a real safety gap |
+| H.5 | `vest`-without-`no_vest` person-containment fallback | ✅ |
+| H.6 | Browser-webcam ingest: `/ws/video` + `/camera` fallback page + dashboard Camera page | ✅ verified live |
+| H.7 | Operator settings: per-item PPE toggles, confidence/pose tuning, detector selection — persisted, override YAML, pushed to the edge over the bus | ✅ verified live |
+| H.8 | Alert board summary + acknowledge | ✅ `GET /alerts/stats` |
+
+**Not ported, deliberately:** `hrm`'s 58 KB inline `dashboard.html` (superseded by the Next.js app;
+the *idea* survives as the small zero-build `/camera` page), its flat SQLite schema, and YOLO26 as
+the pose default (offered in the registry as a selectable person model instead of replacing a
+benchmarked default).
+
+**Bugs found and fixed while integrating:**
+- `set_tracked_items` resolved a payload of unrecognised names to the empty set, **silently
+  disabling every PPE check** — the most dangerous reading of "I could not understand you". It now
+  keeps the current selection unless the all-off request is explicit.
+- The `/models/select` endpoint wrapped the registry's coroutine `ensure_weights` in
+  `run_in_threadpool`, which returns an un-awaited coroutine that stringifies into a bogus weights
+  path instead of downloading anything. Awaited directly, with tests over the download path.
+
+**Verified live** on the running stack: `/camera` fallback served (8.1 KB, real capture JS); browser
+frames processed at 27–65 ms after a 556 ms lazy model load; an undecodable payload reported without
+dropping the socket; browser hazards reach the platform bridge tagged `ingest: "browser"`; a `gloves`
+toggle and a confidence change propagated backend → bus → live edge detector; `/alerts/stats`
+reporting 132 alerts (108 today, 2 outstanding, 88 resolved, 42 suppressed, 6 LLM-disputed).
+424 tests, ruff clean, frontend lint + tsc + build clean (14 routes).

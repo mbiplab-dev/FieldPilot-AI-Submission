@@ -33,6 +33,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from fieldpilot.backend.service import Orchestrator
+from fieldpilot.backend.settings import SETTINGS_TABLE, TRACKED_ITEMS, SettingsService
 from fieldpilot.backend.store import create_platform_store
 from fieldpilot.broadcast import BroadcastHub
 from fieldpilot.core.config import Config, load_config
@@ -106,6 +107,21 @@ class SearchIn(BaseModel):
     zone: str | None = None
     category: str | None = None
     top_k: int = 5
+
+
+class TrackedItemIn(BaseModel):
+    item_name: str
+    enabled: bool
+
+
+class MonitoringIn(BaseModel):
+    confidence_threshold: float | None = None
+    pose_enabled: bool | None = None
+
+
+class ModelSelectIn(BaseModel):
+    model_key: str
+    download: bool = True
 
 
 def _sev_penalty(severity: str) -> int:
@@ -193,6 +209,8 @@ def create_app(cfg: Config) -> FastAPI:
         model=str(cfg.get("reasoning.llm_model", "llama3.2:3b")),
     )
     hub = BroadcastHub(bus)
+    settings = SettingsService(docs, bus)
+    models_dir = str(cfg.get("detection.models_dir", "models"))
 
     orchestrator = Orchestrator(
         bus=bus, events=events_repo, store=store,
@@ -208,8 +226,17 @@ def create_app(cfg: Config) -> FastAPI:
         await bus.start()
         await events_repo.start()
         await store.start()
-        await docs.start([ZONES_TABLE, FEEDBACK_TABLE, LEARNING_RUNS_TABLE])
+        await docs.start([ZONES_TABLE, FEEDBACK_TABLE, LEARNING_RUNS_TABLE, SETTINGS_TABLE])
         await zones.start()
+        await settings.start({
+            "tracked_items": {
+                item: bool((cfg.get("safety.tracked_items") or {}).get(item, item in ("helmet", "vest")))
+                for item in TRACKED_ITEMS
+            },
+            "confidence_threshold": float(cfg.get("detection.conf_min", 0.35)),
+            "pose_enabled": True,
+            "selected_model": str(cfg.get("detection.ppe_model") or ""),
+        })
 
         stored_rules = await store.list_rules()
         if not stored_rules:
@@ -297,6 +324,37 @@ def create_app(cfg: Config) -> FastAPI:
             state=state, severity=severity, worker_id=worker_id, zone=zone,
             event_type=event_type, since=since, limit=limit)}
 
+    @app.get("/alerts/stats")
+    async def alert_stats():
+        """Board summary: totals, today, outstanding, and a per-item breakdown.
+
+        `hrm` surfaced exactly this on its dashboard and it is the shape a site manager wants.
+        "Outstanding" means NEW or ACTIVE here — this platform tracks an alert lifecycle rather
+        than a single acknowledged flag, so an unresolved alert is the equivalent notion.
+        """
+
+        alerts = await store.list_alerts(limit=1000)
+        day_start = time.time() - 86400
+        by_item: dict[str, int] = {}
+        by_severity: dict[str, int] = {}
+        for a in alerts:
+            payload = a.get("payload") or {}
+            item = (payload.get("ppe_item") or payload.get("class")
+                    or payload.get("defect") or a["event_type"])
+            by_item[str(item)] = by_item.get(str(item), 0) + 1
+            by_severity[a["severity"]] = by_severity.get(a["severity"], 0) + 1
+        return {
+            "total": len(alerts),
+            "today": sum(1 for a in alerts if a["first_seen"] >= day_start),
+            "outstanding": sum(1 for a in alerts if a["state"] in ("NEW", "ACTIVE")),
+            "resolved": sum(1 for a in alerts if a["state"] == "RESOLVED"),
+            "suppressed": sum(1 for a in alerts if a["state"] == "SUPPRESSED"),
+            "disputed": sum(1 for a in alerts
+                            if ((a.get("payload") or {}).get("llm_verdict") or {}).get("disputed")),
+            "by_item": dict(sorted(by_item.items(), key=lambda kv: -kv[1])),
+            "by_severity": by_severity,
+        }
+
     @app.get("/alerts/{alert_id}")
     async def get_alert(alert_id: str):
         alert = await store.get_alert(alert_id)
@@ -328,6 +386,17 @@ def create_app(cfg: Config) -> FastAPI:
     @app.post("/alerts/{alert_id}/unsuppress")
     async def unsuppress_alert(alert_id: str):
         return await _mutate(alert_id, "unsuppress")
+
+    @app.post("/alerts/{alert_id}/acknowledge")
+    async def acknowledge_alert(alert_id: str):
+        """Operator has seen and dealt with it.
+
+        `hrm` modelled this as a boolean column. Here the trigger engine already owns an alert
+        lifecycle, so acknowledging resolves the alert rather than adding a parallel flag that
+        could disagree with `state`.
+        """
+
+        return await _mutate(alert_id, "resolve")
 
     # ---------------------------------------------------------------- rules
 
@@ -419,6 +488,84 @@ def create_app(cfg: Config) -> FastAPI:
         if updated is not None:
             await hub.publish("inspection", updated, zone=updated.get("zone"))
         return updated or {}
+
+    # ---------------------------------------------------------------- site config & models
+
+    @app.get("/config")
+    async def site_config():
+        """Everything an operator can change at runtime, plus what it currently resolves to."""
+
+        return {
+            **settings.all(),
+            "tracked_items": settings.tracked_items(),
+            "available_items": list(TRACKED_ITEMS),
+            "models_dir": models_dir,
+            "ppe_weights": _ppe_weights_status(cfg),
+        }
+
+    @app.post("/config/tracked-items")
+    async def set_tracked_item(body: TrackedItemIn):
+        """Enable/disable one PPE check. Pushed to the edge over the bus."""
+
+        try:
+            items = await settings.set_tracked_item(body.item_name, body.enabled)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True, "tracked_items": items}
+
+    @app.post("/config/monitoring")
+    async def set_monitoring(body: MonitoringIn):
+        try:
+            return {"ok": True, **await settings.set_monitoring(
+                confidence_threshold=body.confidence_threshold,
+                pose_enabled=body.pose_enabled,
+            )}
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.get("/models")
+    async def list_detector_models():
+        """The detector registry: what is available, downloaded, and licensed how."""
+
+        try:
+            from fieldpilot.models_registry import list_models
+        except ImportError:  # pragma: no cover - registry is optional at runtime
+            raise HTTPException(503, "model registry unavailable") from None
+        return {
+            "models": list_models(models_dir),
+            "selected": settings.get("selected_model"),
+        }
+
+    @app.post("/models/select")
+    async def select_detector_model(body: ModelSelectIn):
+        """Choose a detector, fetching + checksum-verifying its weights if needed.
+
+        The edge owns the actual model swap; this records the choice, makes sure the verified
+        weights are on disk, and publishes `control.settings` for the edge to act on.
+        """
+
+        try:
+            from fieldpilot.models_registry import (
+                ModelRegistryError,
+                ensure_weights,
+                get_option,
+            )
+        except ImportError:  # pragma: no cover
+            raise HTTPException(503, "model registry unavailable") from None
+
+        if get_option(body.model_key) is None:
+            raise HTTPException(400, f"unknown model key {body.model_key!r}")
+        path = None
+        if body.download:
+            try:
+                # `ensure_weights` is a coroutine that already offloads hashing/IO to a thread
+                path = str(await ensure_weights(body.model_key, models_dir))
+            except ModelRegistryError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            except Exception as exc:  # noqa: BLE001 — surface the real reason to the operator
+                raise HTTPException(400, f"{type(exc).__name__}: {exc}") from exc
+        await settings.set_selected_model(body.model_key)
+        return {"ok": True, "model_key": body.model_key, "weights": path}
 
     # ---------------------------------------------------------------- zones
 

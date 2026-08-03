@@ -7,6 +7,7 @@ import { ThemeToggle } from "./ThemeToggle";
 const NAV = [
   { href: "/", label: "Overview", icon: "M3 12 12 3l9 9M5 10v10h4v-6h6v6h4V10" },
   { href: "/live", label: "Live", icon: "M23 7 16 12l7 5V7zm-9 1a4 4 0 1 1-4 4 4 4 0 0 1 4-4zM1 5h14v14H1a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z" },
+  { href: "/camera", label: "Camera", icon: "M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" },
   { href: "/alerts", label: "Alerts", icon: "M18 8A6 6 0 0 0 6 8 5 5 0 0 0 5 22h13a5 5 0 0 0 0-14M12 9v4m0 4h.01" },
   { href: "/rfis", label: "RFIs", icon: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zm0 0v6h6M9 15l2 2 4-4" },
   { href: "/workers", label: "Workers", icon: "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm14 10v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" },

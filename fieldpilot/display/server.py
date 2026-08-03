@@ -6,21 +6,37 @@ for the analysis panel and hazard event feed.
 
     uv run python -m fieldpilot.display.server         # or: python -m fieldpilot.run --gui
     open http://localhost:8000
+
+Two ingest paths exist, and they are deliberately the *same* pipeline code:
+
+- server camera — `/dev/videoN` (or a file / synthetic source) read by `VideoSource`, annotated
+  server-side and served as MJPEG on `/stream`.
+- browser camera — the site manager's own browser captures the camera with `getUserMedia` and ships
+  JPEG frames to `/ws/video`; we answer with JSON detections that the browser draws on a canvas.
+  This is what lets FieldPilot run on a laptop or a phone, where the camera belongs to the browser
+  and the server has no camera at all. Hazards raised from browser frames go through the very same
+  event bridge, so bus → triggers → rules → alerts behaves identically for both paths.
 """
 
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+import json
+import re
+import time
+from contextlib import asynccontextmanager, suppress
 
-from fastapi import FastAPI
+import cv2
+import numpy as np
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from fieldpilot.core.config import Config, load_config
 from fieldpilot.core.pipeline import Pipeline
+from fieldpilot.core.types import Frame
 from fieldpilot.core.video_source import VideoSource
 from fieldpilot.display.state import LiveState
-from fieldpilot.logging_.logger import get_logger, setup_logging
+from fieldpilot.logging_.logger import get_logger, jsonl_append, setup_logging
 
 log = get_logger("fieldpilot.gui")
 
@@ -51,6 +67,48 @@ class _ForwardingBridge:
         return event
 
 
+def _apply_settings(pipeline, settings: dict) -> None:
+    """Apply an operator settings change from `control.settings` to the running detectors.
+
+    The backend owns persistence; the edge owns the live models. A partial payload is normal —
+    the dashboard publishes only the key that changed — so every field is optional here.
+
+    Failures are logged and swallowed: a bad settings payload must never stop the safety loop.
+    """
+
+    ppe = getattr(pipeline, "ppe", None)
+
+    if "tracked_items" in settings and ppe is not None:
+        try:
+            applied = ppe.set_tracked_items(settings["tracked_items"])
+            log.info("control.settings -> tracked PPE items now %s",
+                     ", ".join(sorted(applied)) or "(none)")
+        except Exception:  # noqa: BLE001
+            log.exception("could not apply tracked_items %r", settings["tracked_items"])
+
+    if "confidence_threshold" in settings:
+        try:
+            value = float(settings["confidence_threshold"])
+        except (TypeError, ValueError):
+            log.warning("ignoring non-numeric confidence_threshold %r",
+                        settings["confidence_threshold"])
+        else:
+            for target in (ppe, getattr(pipeline, "engine", None)):
+                if target is not None and hasattr(target, "conf_min"):
+                    target.conf_min = value
+            log.info("control.settings -> confidence threshold %.2f", value)
+
+    if "selected_model" in settings:
+        # Swapping detector weights means reloading a model on the inference thread, which the
+        # pipeline does not currently support mid-run. Say so plainly instead of silently
+        # accepting a change that did not take effect.
+        log.warning(
+            "control.settings -> selected_model=%r recorded by the backend, but the edge cannot "
+            "hot-swap detector weights; restart the edge to pick it up",
+            settings["selected_model"],
+        )
+
+
 def _build_source(cfg: Config, kind: str | None, file_path: str | None) -> VideoSource:
     v = cfg.section("video")
     return VideoSource(
@@ -63,11 +121,269 @@ def _build_source(cfg: Config, kind: str | None, file_path: str | None) -> Video
     )
 
 
+# --- browser-webcam ingest -----------------------------------------------------------------------
+
+_CLASS_RE = re.compile(r"[^a-z0-9]+")
+_DEFECT_SEVERE = 0.85
+
+
+def normalise_class(name: str) -> str:
+    """`NO-Hardhat` / `Safety Vest` → `no_hardhat` / `safety_vest`.
+
+    Detector class names vary per checkpoint; the wire format must not. Normalising here means the
+    browser overlay and any consumer can switch on a stable identifier.
+    """
+
+    return _CLASS_RE.sub("_", str(name).strip().lower()).strip("_")
+
+
+def decode_jpeg(payload: bytes) -> np.ndarray | None:
+    """JPEG bytes → BGR ndarray, or None when the payload is not a decodable image."""
+
+    if not payload:
+        return None
+    buf = np.frombuffer(payload, dtype=np.uint8)
+    if buf.size == 0:
+        return None
+    return cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
+
+def _detect(pipeline: Pipeline, frame: Frame):
+    """Run the pipeline's own per-frame work: inference, then every safety detector in order.
+
+    `Pipeline._process` is the single place that runs fall → PPE → inspection → proximity →
+    attention and maintains the active-hazard registry. Driving *it* — rather than re-listing the
+    detectors here — is what guarantees a browser frame is treated exactly like a `/dev/video0`
+    frame, including tracker state, cooldowns and the attention state machine. `pipeline.py` is
+    owned elsewhere, so no new public entry point was added for this; both calls run in one
+    executor submission so the event loop is never blocked by GPU work.
+    """
+
+    result = pipeline.engine.infer(frame)
+    return result, pipeline._process(result)
+
+
+def _boxes_for(result, pipeline: Pipeline, hazards: list) -> tuple[list[dict], int]:
+    """Flatten persons + PPE + equipment + structural defects into one wire-format box list."""
+
+    flagged = {h.track_id for h in hazards if h.track_id is not None}
+    out: list[dict] = []
+    for p in result.persons:
+        out.append({
+            "class": "person",
+            "category": "person",
+            "confidence": round(float(p.conf), 3),
+            "box": [round(float(v), 1) for v in p.bbox],
+            "track_id": p.track_id,
+            "is_violation": p.track_id in flagged,
+        })
+
+    violations = 0
+    for box in pipeline.ppe.last_boxes:
+        ok = bool(box.get("ok", True))
+        violations += 0 if ok else 1
+        conf = box.get("conf")
+        out.append({
+            "class": normalise_class(box.get("label", "")),
+            "category": "ppe",
+            "ppe_item": box.get("cat"),
+            "confidence": round(float(conf), 3) if conf is not None else None,
+            "box": [round(float(v), 1) for v in box["bbox"]],
+            "is_violation": not ok,
+        })
+
+    for eq in pipeline.ppe.equipment_boxes:
+        out.append({
+            "class": normalise_class(eq.get("label", eq.get("kind", ""))),
+            "category": "equipment",
+            "kind": eq.get("kind"),
+            "confidence": None,
+            "box": [round(float(v), 1) for v in eq["bbox"]],
+            "is_violation": False,
+        })
+
+    for box in pipeline.inspection.last_boxes:
+        severity = float(box.get("severity_score", 0.0))
+        out.append({
+            "class": normalise_class(box.get("label", "")),
+            "category": "defect",
+            "severity_score": round(severity, 2),
+            "confidence": None,
+            "box": [round(float(v), 1) for v in box["bbox"]],
+            "is_violation": severity >= _DEFECT_SEVERE,
+        })
+    return out, violations
+
+
+def _poses_for(result, kp_conf: float) -> list[dict]:
+    """COCO-17 keypoints per tracked person, as [x, y, confidence] triples."""
+
+    poses = []
+    for p in result.persons:
+        kps = [
+            [round(float(x), 1), round(float(y), 1), round(float(c), 3)]
+            for x, y, c in p.keypoints
+        ]
+        poses.append({
+            "track_id": p.track_id,
+            "keypoints": kps,
+            "visible": sum(1 for k in kps if k[2] >= kp_conf),
+        })
+    return poses
+
+
+def _hazard_json(event) -> dict:
+    return {
+        "id": event.id,
+        "type": event.category(),
+        "severity": event.severity.value,
+        "message": event.message,
+        "track_id": event.track_id,
+        "bbox": [round(float(v), 1) for v in event.bbox] if event.bbox is not None else None,
+        "ts_wall": event.ts_wall,
+    }
+
+
+async def _publish_hazard(pipeline: Pipeline, event, result, sink) -> None:
+    """Do with a browser-sourced hazard exactly what `Pipeline.run` does with a camera-sourced one.
+
+    Same durable log, same alert snapshot, same event bridge (bus → triggers → rules → alerts) when
+    one is configured, and the same local earcon/TTS dispatch when it is not. Browser frames must
+    not become a second, parallel universe.
+    """
+
+    pipeline.store.record_event(event, alerted=True)
+    record = None
+    if pipeline.event_bridge is not None:
+        pipeline._save_alert_image(event, result.frame.image)
+        await pipeline.event_bridge.emit(event)
+    else:
+        record = pipeline.dispatcher.dispatch(event)
+    jsonl_append(pipeline.jsonl_path, {
+        "event": event,
+        "admitted": record.admitted if record else None,
+        "latency_ms": round(record.latency_ms, 1) if record else None,
+        "routed": "bus" if pipeline.event_bridge is not None else "dispatcher",
+        "ingest": "browser",
+    })
+    if sink is not None:
+        sink.add_event({
+            "type": event.category(),
+            "severity": event.severity.value,
+            "message": event.message,
+            "track_id": event.track_id,
+            "latency_ms": (round(record.latency_ms, 1)
+                           if record is not None and record.admitted else None),
+            "ts_wall": event.ts_wall,
+            "source": "browser",
+        })
+
+
+async def process_browser_frame(pipeline: Pipeline, image: np.ndarray, index: int,
+                                *, sink=None) -> dict:
+    """One browser frame → one JSON reply, with every hazard routed like a camera hazard."""
+
+    loop = asyncio.get_running_loop()
+    height, width = int(image.shape[0]), int(image.shape[1])
+    # phones rotate and browsers renegotiate resolution mid-stream, so re-declare it every frame
+    # (the estimator only resets its history when the size actually changes).
+    pipeline.gaze.set_frame_size(width, height)
+    frame = Frame(index=index, ts_monotonic=time.monotonic(), image=image)
+
+    started = time.perf_counter()
+    result, hazards = await loop.run_in_executor(None, _detect, pipeline, frame)
+    inference_ms = round((time.perf_counter() - started) * 1000.0, 1)
+
+    pipeline.frame_count += 1
+    for event in hazards:
+        pipeline.hazard_count += 1
+        pipeline._type_counts[event.category()] = pipeline._type_counts.get(event.category(), 0) + 1
+        # so a reviewer can tell which camera path produced the alert
+        event.meta.setdefault("ingest", "browser")
+        await _publish_hazard(pipeline, event, result, sink)
+
+    detections, violations = _boxes_for(result, pipeline, hazards)
+    poses = _poses_for(result, pipeline.kp_conf)
+    return {
+        "frame": {"index": index, "width": width, "height": height},
+        "detections": detections,
+        "poses": poses,
+        "counts": {
+            "people": len(result.persons),
+            "ppe_items": len(pipeline.ppe.last_boxes),
+            "violations": violations,
+            "poses": sum(1 for p in poses if p["visible"] > 0),
+        },
+        "inference_ms": inference_ms,
+        "hazards": [_hazard_json(e) for e in hazards],
+        "active_hazards": [
+            {"type": h.hazard_type.value, "track_id": h.track_id} for h in pipeline._active
+        ],
+    }
+
+
+class LatestFrame:
+    """Single-slot mailbox with drop-oldest semantics.
+
+    A browser can encode frames faster than the server can infer on them. Queueing would grow
+    unbounded latency and memory for no benefit — a stale frame is worthless for safety — so a new
+    frame simply replaces the one still waiting, mirroring `VideoSource`'s bounded drop-oldest
+    queue. `dropped` is reported back to the client so the overlay can show the real ingest rate.
+    """
+
+    def __init__(self) -> None:
+        self._payload: bytes | None = None
+        self._ready = asyncio.Event()
+        self._closed = False
+        self.dropped = 0
+
+    def put(self, payload: bytes) -> None:
+        if self._payload is not None:
+            self.dropped += 1
+        self._payload = payload
+        self._ready.set()
+
+    def close(self) -> None:
+        self._closed = True
+        self._ready.set()
+
+    async def get(self) -> bytes | None:
+        """Newest pending frame, or None once the producer has closed and drained."""
+
+        while self._payload is None and not self._closed:
+            self._ready.clear()
+            await self._ready.wait()
+        payload, self._payload = self._payload, None
+        return payload
+
+
+async def _read_frames(websocket: WebSocket, slot: LatestFrame) -> None:
+    """Drain the socket as fast as it delivers, keeping only the newest frame."""
+
+    try:
+        while True:
+            slot.put(await websocket.receive_bytes())
+    except WebSocketDisconnect:
+        pass
+    except (KeyError, RuntimeError, ValueError):
+        # a text frame (no "bytes" key) or a socket already closed — treat as end of stream
+        log.debug("browser camera reader stopped", exc_info=True)
+    finally:
+        slot.close()
+
+
 def create_app(cfg: Config, source_kind: str | None = None, file_path: str | None = None,
                with_bus: bool = False) -> FastAPI:
     state = LiveState()
 
     forward_holder: dict = {}
+    # browser-camera ingest: its own Pipeline (built on first WebSocket frame) sharing this app's
+    # event bridge. A *separate* instance because BoT-SORT track state, fall-velocity buffers and
+    # PPE cooldowns are per-camera — feeding two cameras through one set of detectors would cross
+    # their track IDs. The bridge, and therefore the whole downstream platform, is shared.
+    browser_holder: dict = {}
+    browser_build_lock = asyncio.Lock()
+    browser_gate = asyncio.Lock()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -106,19 +422,26 @@ def create_app(cfg: Config, source_kind: str | None = None, file_path: str | Non
                 bridge = _ForwardingBridge(bridge, forwarder)
 
             async def _on_control(topic: str, msg: dict) -> None:
+                p = pipeline_holder.get("pipeline")
+                if p is None:
+                    return
                 if topic == "control.inspection":
-                    p = pipeline_holder.get("pipeline")
-                    if p is not None:
-                        actual = p.set_inspection(bool(msg.get("enabled")))
-                        log.info("control.inspection -> inspection mode %s",
-                                 "ON" if actual else "OFF")
+                    actual = p.set_inspection(bool(msg.get("enabled")))
+                    log.info("control.inspection -> inspection mode %s",
+                             "ON" if actual else "OFF")
+                elif topic == "control.settings":
+                    _apply_settings(p, msg)
 
             await bus.subscribe("control.inspection", _on_control)
+            # operator settings changed on the dashboard reach the running detectors here, so a
+            # PPE item switched off stops raising violations without an edge restart
+            await bus.subscribe("control.settings", _on_control)
             log.info("GUI in bus mode — detections publish to %s",
                      cfg.get("events.bus_backend", "memory"))
 
         pipeline = Pipeline(cfg, sink=state, event_bridge=bridge)
         pipeline_holder["pipeline"] = pipeline
+        browser_holder["bridge"] = bridge
         task = asyncio.create_task(pipeline.run(source))
         log.info("GUI pipeline started — open http://localhost:8000")
         try:
@@ -131,6 +454,10 @@ def create_app(cfg: Config, source_kind: str | None = None, file_path: str | Non
                 await task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
+            browser = browser_holder.pop("pipeline", None)
+            if browser is not None:
+                browser.dispatcher.shutdown()
+                browser.store.close()
             if forwarder is not None:
                 await forwarder.stop()
             if docs is not None:
@@ -159,6 +486,79 @@ def create_app(cfg: Config, source_kind: str | None = None, file_path: str | Non
                 await asyncio.sleep(1 / 25)
 
         return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+    async def browser_pipeline() -> Pipeline:
+        """The browser-ingest pipeline, built once, lazily (loading weights costs seconds + VRAM)."""
+
+        async with browser_build_lock:
+            pipeline = browser_holder.get("pipeline")
+            if pipeline is None:
+                pipeline = await asyncio.to_thread(
+                    Pipeline, cfg, sink=None, event_bridge=browser_holder.get("bridge"),
+                )
+                browser_holder["pipeline"] = pipeline
+                log.info("browser-camera pipeline ready (bridge=%s)",
+                         "bus" if browser_holder.get("bridge") is not None else "local dispatcher")
+            return pipeline
+
+    @app.get("/camera", response_class=HTMLResponse)
+    async def camera_page() -> str:
+        """Zero-build-step capture page, so browser ingest works without the Next.js app."""
+
+        return _CAMERA_PAGE
+
+    @app.websocket("/ws/video")
+    async def ws_video(websocket: WebSocket) -> None:
+        """Browser-captured JPEG frames in, JSON detections out."""
+
+        await websocket.accept()
+        try:
+            pipeline = await browser_pipeline()
+        except Exception as exc:  # noqa: BLE001 — no detector means say so, not die silently
+            log.exception("browser-camera pipeline could not be built")
+            with suppress(Exception):
+                await websocket.send_json({"error": f"detector unavailable: {exc}"})
+            with suppress(Exception):
+                await websocket.close(code=1011)
+            return
+
+        slot = LatestFrame()
+        reader = asyncio.create_task(_read_frames(websocket, slot))
+        index = 0
+        try:
+            while True:
+                payload = await slot.get()
+                if payload is None:
+                    break
+                image = await asyncio.to_thread(decode_jpeg, payload)
+                if image is None or image.size == 0:
+                    log.warning("ignored an undecodable browser frame (%d bytes)", len(payload))
+                    await websocket.send_json({
+                        "error": "The camera frame could not be decoded as a JPEG.",
+                        "dropped": slot.dropped,
+                    })
+                    continue
+                try:
+                    async with browser_gate:
+                        body = await process_browser_frame(pipeline, image, index, sink=state)
+                except (WebSocketDisconnect, asyncio.CancelledError):
+                    raise
+                except Exception as exc:  # noqa: BLE001 — one bad frame must not drop the socket
+                    log.exception("browser frame processing failed")
+                    await websocket.send_json({"error": f"Frame processing failed: {exc}"})
+                    continue
+                index += 1
+                body["dropped"] = slot.dropped
+                await websocket.send_text(json.dumps(body))
+        except WebSocketDisconnect:
+            log.info("browser camera socket disconnected after %d frame(s)", index)
+        except RuntimeError:
+            # send on an already-closed socket — the client is gone, nothing to report to
+            log.debug("browser camera socket closed mid-send", exc_info=True)
+        finally:
+            reader.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await reader
 
     @app.get("/offline/status")
     async def offline_status() -> JSONResponse:
@@ -279,6 +679,174 @@ async function tick(){
   }catch(e){$('dot').style.background='var(--hi)';}
 }
 setInterval(tick,500); tick();
+</script>
+</body></html>"""
+
+
+_CAMERA_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FieldPilot AI — Browser camera</title>
+<style>
+  :root{--bg:#0d1017;--panel:#161b26;--line:#232b3a;--txt:#e6e9ef;--dim:#8b94a7;--hi:#ff5252;--ok:#4ade80}
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.45 ui-sans-serif,system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--txt)}
+  header{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px 18px;border-bottom:1px solid var(--line);background:var(--panel)}
+  h1{font-size:16px;margin:0;font-weight:600}
+  select,button{font:inherit;background:#0f131c;color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+  button{cursor:pointer}
+  .wrap{padding:16px;max-width:1000px;margin:0 auto}
+  .stage{position:relative;background:#000;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  video,canvas{display:block;width:100%;height:auto}
+  canvas{position:absolute;inset:0}
+  .row{display:flex;flex-wrap:wrap;gap:14px;margin-top:12px;color:var(--dim);font-variant-numeric:tabular-nums}
+  .row b{color:var(--txt)}
+  .msg{margin:12px 0 0;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+  .msg.bad{border-color:var(--hi);color:#ffc9c9}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--dim)}
+</style></head>
+<body>
+<header>
+  <span class="dot" id="dot"></span><h1>FieldPilot AI</h1>
+  <span style="color:var(--dim)">browser camera → edge inference</span>
+  <span style="flex:1"></span>
+  <select id="cams" aria-label="Camera"></select>
+  <button id="toggle">Start</button>
+</header>
+<div class="wrap">
+  <div class="stage"><video id="v" playsinline muted></video><canvas id="c"></canvas></div>
+  <div class="row">
+    <span>people <b id="people">–</b></span><span>PPE <b id="ppe">–</b></span>
+    <span>violations <b id="viol">–</b></span><span>poses <b id="poses">–</b></span>
+    <span>inference <b id="ms">–</b> ms</span><span>dropped <b id="drop">0</b></span>
+  </div>
+  <p class="msg" id="msg">Pick a camera and press Start. Your browser will ask for permission.</p>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const SKELETON = [[5,7],[7,9],[6,8],[8,10],[5,6],[5,11],[6,12],[11,12],[11,13],[13,15],[12,14],
+                  [14,16],[0,1],[0,2],[1,3],[2,4],[0,5],[0,6]];
+const FPS = 9, QUALITY = 0.6, KP = 0.3;
+let stream = null, socket = null, timer = null, inFlight = false;
+
+function say(text, bad){ const m = $('msg'); m.textContent = text; m.className = 'msg' + (bad ? ' bad' : ''); }
+
+async function listCameras(){
+  if(!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const cams = devices.filter(d => d.kind === 'videoinput');
+  $('cams').innerHTML = cams.length
+    ? cams.map((d,i) => `<option value="${d.deviceId}">${d.label || 'Camera ' + (i+1)}</option>`).join('')
+      + '<option value="user">Front camera (mobile)</option><option value="environment">Rear camera (mobile)</option>'
+    : '<option value="environment">Rear camera</option><option value="user">Front camera</option>';
+}
+
+function constraints(){
+  const v = $('cams').value;
+  const size = { width:{ideal:1280}, height:{ideal:720} };
+  if(v === 'user' || v === 'environment') return { video:{ facingMode:{ideal:v}, ...size }, audio:false };
+  return { video: v ? { deviceId:{exact:v}, ...size } : size, audio:false };
+}
+
+async function start(){
+  if(!window.isSecureContext){
+    say('Camera access needs a secure context: open this page over HTTPS, or via localhost.', true);
+    return;
+  }
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    say('This browser does not expose getUserMedia, so it cannot share a camera.', true); return;
+  }
+  try{
+    stream = await navigator.mediaDevices.getUserMedia(constraints());
+  }catch(err){
+    const n = err && err.name;
+    say(n === 'NotAllowedError' ? 'Camera permission was denied — allow it in the address bar and retry.'
+      : n === 'NotFoundError' ? 'No camera was found on this device.'
+      : n === 'NotReadableError' ? 'The camera is already in use by another application.'
+      : 'Could not open the camera: ' + (err && err.message || err), true);
+    return;
+  }
+  $('v').srcObject = stream;
+  await $('v').play();
+  await listCameras();                       // labels are only exposed after permission
+  connect();
+  $('toggle').textContent = 'Stop';
+}
+
+function connect(){
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  socket = new WebSocket(scheme + '://' + location.host + '/ws/video');
+  socket.onopen = () => {
+    $('dot').style.background = 'var(--ok)';
+    say('Streaming to the edge detector at ~' + FPS + ' fps.');
+    timer = setInterval(send, Math.round(1000 / FPS));
+  };
+  socket.onclose = () => { $('dot').style.background = 'var(--hi)';
+    if(timer){ clearInterval(timer); timer = null; }
+    if(stream) say('The detector socket closed. Press Stop then Start to reconnect.', true); };
+  socket.onerror = () => say('The detector socket could not be reached at /ws/video.', true);
+  socket.onmessage = ev => {
+    inFlight = false;
+    const data = JSON.parse(ev.data);
+    if(data.error){ say(data.error, true); return; }
+    draw(data);
+  };
+}
+
+const off = document.createElement('canvas');
+function send(){
+  const video = $('v');
+  if(inFlight || !socket || socket.readyState !== WebSocket.OPEN || !video.videoWidth) return;
+  off.width = video.videoWidth; off.height = video.videoHeight;
+  off.getContext('2d').drawImage(video, 0, 0);
+  off.toBlob(blob => {
+    if(!blob || !socket || socket.readyState !== WebSocket.OPEN) return;
+    inFlight = true;                                  // one frame in flight: never flood the edge
+    blob.arrayBuffer().then(buf => socket.send(buf));
+  }, 'image/jpeg', QUALITY);
+}
+
+function draw(data){
+  $('people').textContent = data.counts.people; $('ppe').textContent = data.counts.ppe_items;
+  $('viol').textContent = data.counts.violations; $('poses').textContent = data.counts.poses;
+  $('ms').textContent = data.inference_ms; $('drop').textContent = data.dropped ?? 0;
+
+  const c = $('c'), ctx = c.getContext('2d');
+  c.width = data.frame.width; c.height = data.frame.height;
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.lineWidth = Math.max(2, c.width / 480); ctx.font = Math.round(c.width / 46) + 'px sans-serif';
+  for(const d of data.detections){
+    const [x1,y1,x2,y2] = d.box, color = d.is_violation ? '#ff4d4d' : '#4ade80';
+    ctx.strokeStyle = color; ctx.strokeRect(x1, y1, x2-x1, y2-y1);
+    const text = d.class + (d.confidence != null ? ' ' + d.confidence.toFixed(2) : '');
+    ctx.fillStyle = 'rgba(0,0,0,.65)';
+    ctx.fillRect(x1, Math.max(0, y1 - 18), ctx.measureText(text).width + 8, 18);
+    ctx.fillStyle = color; ctx.fillText(text, x1 + 4, Math.max(12, y1 - 5));
+  }
+  const flagged = new Set(data.hazards.map(h => h.track_id));
+  for(const pose of data.poses){
+    const k = pose.keypoints, color = flagged.has(pose.track_id) ? '#ff4d4d' : '#5b9dff';
+    ctx.strokeStyle = color; ctx.fillStyle = color;
+    for(const [a,b] of SKELETON){
+      if(k[a][2] < KP || k[b][2] < KP) continue;
+      ctx.beginPath(); ctx.moveTo(k[a][0], k[a][1]); ctx.lineTo(k[b][0], k[b][1]); ctx.stroke();
+    }
+    for(const p of k){ if(p[2] >= KP){ ctx.beginPath(); ctx.arc(p[0], p[1], ctx.lineWidth, 0, 6.3); ctx.fill(); } }
+  }
+}
+
+function stop(){
+  if(timer){ clearInterval(timer); timer = null; }
+  if(socket){ socket.onclose = null; socket.close(); socket = null; }
+  if(stream){ stream.getTracks().forEach(t => t.stop()); stream = null; }
+  $('v').srcObject = null; inFlight = false;
+  $('dot').style.background = 'var(--dim)';
+  $('c').getContext('2d').clearRect(0, 0, $('c').width, $('c').height);
+  $('toggle').textContent = 'Start'; say('Stopped. The camera has been released.');
+}
+
+$('toggle').onclick = () => (stream ? stop() : start());
+window.addEventListener('pagehide', stop);
+listCameras().catch(() => {});
 </script>
 </body></html>"""
 
