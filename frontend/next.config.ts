@@ -12,6 +12,8 @@ const nextConfig: NextConfig = {
       { source: "/feed/:path*", destination: `${EDGE}/:path*` },
       // alert snapshot images (annotated bbox JPEGs the backend serves from data/alerts)
       { source: "/img/:path*", destination: `${BACKEND}/images/:path*` },
+      // worker-submitted photos (question attachments, manual hazard reports)
+      { source: "/uploads/:path*", destination: `${BACKEND}/uploads/:path*` },
     ];
   },
 };

@@ -3,6 +3,8 @@
  * All calls go through the same-origin `/api` rewrite → http://localhost:8100.
  */
 
+import { clearSession, sessionToken } from "./session";
+
 const BASE = "/api";
 
 /** Thrown by every call in this module. `status === 0` means the network never answered. */
@@ -39,15 +41,24 @@ function detailOf(body: unknown): string | null {
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  // Every role-gated endpoint needs this; unauthenticated calls (e.g. /auth/login itself)
+  // simply have no token to attach.
+  const headers = new Headers(init?.headers);
+  const token = sessionToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+
   let res: Response;
   try {
-    res = await fetch(`${BASE}${path}`, { cache: "no-store", ...init });
+    res = await fetch(`${BASE}${path}`, { cache: "no-store", ...init, headers });
   } catch {
     throw new ApiError(0, "Backend unreachable — is the API running on :8100?");
   }
   const text = await res.text();
   const body = text ? parseJson(text) : null;
   if (!res.ok) {
+    // A 401 means the token is gone or expired server-side — drop it locally too, so every
+    // page's session hook sees "signed out" instead of retrying with a dead token forever.
+    if (res.status === 401) clearSession();
     throw new ApiError(res.status, detailOf(body) ?? `${res.status} ${res.statusText || "request failed"}`);
   }
   return body as T;
@@ -77,6 +88,28 @@ function qs(params: Record<string, QueryValue>): string {
   }
   const s = q.toString();
   return s ? `?${s}` : "";
+}
+
+/* ----------------------------------- auth ----------------------------------- */
+
+export type UserRole = "worker" | "site_manager";
+
+export interface AuthUser {
+  user_id: string;
+  username: string;
+  display_name: string;
+  role: UserRole;
+  worker_id: string | null;
+}
+
+export interface LoginInput {
+  username: string;
+  password: string;
+}
+
+export interface LoginResult {
+  token: string;
+  user: AuthUser;
 }
 
 /* ------------------------------- types ------------------------------- */
@@ -180,6 +213,80 @@ export interface ZoneCreate {
 }
 
 export type ZoneUpdate = Partial<ZoneCreate>;
+
+/** One worker currently checked into a zone. */
+export interface ZoneOccupant {
+  worker_id: string;
+  display_name?: string | null;
+  entered_at: number;
+}
+
+export interface ZoneWarningCounts {
+  total: number;
+  today: number;
+  outstanding: number;
+  by_severity: Record<string, number>;
+}
+
+/**
+ * `GET /zones/occupancy` — who is where, and which zones are generating the most warnings.
+ * Rows come back worst-first; `risk_rank` is 1-based over that order.
+ */
+export interface ZoneOccupancy {
+  zone_id: string;
+  name: string;
+  hazard_level: HazardLevel;
+  danger: boolean;
+  workers: ZoneOccupant[];
+  worker_count: number;
+  warnings: ZoneWarningCounts;
+  risk_score: number;
+  risk_rank: number;
+}
+
+/* ---------------------------- worker questions ---------------------------- */
+
+export type QuestionStatus = "pending" | "answered" | "closed";
+
+export interface QuestionCitation {
+  citation: string;
+  clause?: string | null;
+  source?: string | null;
+  page?: number | null;
+  zone?: string | null;
+  score?: number | null;
+  text?: string;
+}
+
+export interface WorkerQuestion {
+  question_id: string;
+  worker_id: string;
+  zone: string | null;
+  text: string;
+  image_url: string | null;
+  status: QuestionStatus;
+  llm_answer: string | null;
+  llm_grounded: boolean | null;
+  llm_model: string | null;
+  citations: QuestionCitation[];
+  manager_reply: string | null;
+  manager_id: string | null;
+  replied_at: number | null;
+  created_at: number;
+  answered_at: number | null;
+}
+
+export interface QuestionReplyInput {
+  reply: string;
+}
+
+export interface QuestionStats {
+  total: number;
+  pending: number;
+  answered: number;
+  closed: number;
+  awaiting_manager: number;
+}
 
 /* ---------------------------- supervisor feedback ---------------------------- */
 
@@ -407,6 +514,11 @@ export interface Health {
 /* ------------------------------- calls ------------------------------- */
 
 export const api = {
+  /* auth */
+  login: (input: LoginInput) => post<LoginResult>("/auth/login", input),
+  logout: () => post<{ ok: boolean }>("/auth/logout"),
+  me: () => get<AuthUser>("/auth/me"),
+
   health: () => get<Health>("/health"),
 
   alerts: (params: Record<string, string | undefined> = {}) => {
@@ -436,6 +548,17 @@ export const api = {
   createZone: (zone: ZoneCreate) => post<Zone>("/zones", zone),
   updateZone: (id: string, zone: ZoneUpdate) => put<Zone>(`/zones/${encodeURIComponent(id)}`, zone),
   deleteZone: (id: string) => del<{ deleted: boolean }>(`/zones/${encodeURIComponent(id)}`),
+  zoneOccupancy: () => get<{ zones: ZoneOccupancy[] }>("/zones/occupancy"),
+
+  /* worker questions — the manager-facing inbox */
+  questions: (params: { status?: QuestionStatus | ""; zone?: string; limit?: number } = {}) =>
+    get<{ questions: WorkerQuestion[] }>(
+      `/questions${qs({ status: params.status, zone: params.zone, limit: params.limit ?? 100 })}`,
+    ),
+  question: (id: string) => get<WorkerQuestion>(`/questions/${encodeURIComponent(id)}`),
+  replyToQuestion: (id: string, input: QuestionReplyInput) =>
+    post<WorkerQuestion>(`/questions/${encodeURIComponent(id)}/reply`, input),
+  questionStats: () => get<QuestionStats>("/questions/stats"),
 
   /* supervisor feedback — closes the learning loop */
   submitFeedback: (alertId: string, input: FeedbackInput) =>

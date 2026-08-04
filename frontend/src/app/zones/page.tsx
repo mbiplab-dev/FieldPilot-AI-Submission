@@ -22,9 +22,11 @@ import {
   api,
   errorMessage,
   fmtDateTime,
+  timeAgo,
   type HazardLevel,
   type Zone,
   type ZoneCreate,
+  type ZoneOccupancy,
 } from "@/lib/api";
 import { usePoll } from "@/lib/usePoll";
 import { useLiveFeed } from "@/lib/useLiveFeed";
@@ -98,6 +100,14 @@ export default function ZonesPage() {
 
   const zones = data?.zones ?? [];
 
+  const {
+    data: occData,
+    error: occError,
+    loading: occLoading,
+    refresh: refreshOcc,
+  } = usePoll(() => api.zoneOccupancy(), 15000);
+  const occupancy = occData?.zones ?? [];
+
   const submitCreate = async () => {
     if (!create.name.trim()) {
       setCreateError("A zone needs a name.");
@@ -161,6 +171,90 @@ export default function ZonesPage() {
         subtitle="Named site areas · hazard level drives severity, the danger flag arms proximity rules"
         action={<LiveChip connected={live.connected} />}
       />
+
+      <SectionTitle>Occupancy &amp; risk</SectionTitle>
+      <p className="mb-3 -mt-1 text-[12px] text-txt-3">
+        Who is checked into each zone right now, and which zones are generating the most
+        warnings — ranked worst-first.
+      </p>
+      {occError && !occData ? (
+        <ErrorState message={occError} onRetry={() => void refreshOcc()} />
+      ) : occLoading && !occData ? (
+        <Card className="mb-6">
+          <Loading label="Loading occupancy…" />
+        </Card>
+      ) : (
+        <Card className="mb-6 overflow-x-auto">
+          <table className="w-full min-w-[760px]">
+            <thead>
+              <tr className="border-b border-line text-left">
+                <Th>Rank</Th>
+                <Th>Zone</Th>
+                <Th>Workers present</Th>
+                <Th>Warnings (outstanding / today / total)</Th>
+                <Th className="text-right">Risk score</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {occupancy.length ? (
+                occupancy.map((row: ZoneOccupancy) => (
+                  <tr key={row.zone_id} className="border-b border-line-soft last:border-0">
+                    <Td>
+                      <span
+                        className={`inline-flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold ${
+                          row.risk_rank === 1 && row.risk_score > 0
+                            ? "bg-red-500/15 text-red-500"
+                            : "bg-panel-2 text-txt-3"
+                        }`}
+                      >
+                        {row.risk_rank}
+                      </span>
+                    </Td>
+                    <Td>
+                      <div className="font-semibold">{row.name}</div>
+                      {row.danger ? <Badge tone="bad">danger zone</Badge> : null}
+                    </Td>
+                    <Td>
+                      {row.worker_count === 0 ? (
+                        <span className="text-txt-3">Empty</span>
+                      ) : (
+                        <div className="flex flex-wrap gap-1">
+                          {row.workers.map((w) => (
+                            <span
+                              key={w.worker_id}
+                              title={`Since ${timeAgo(w.entered_at)}`}
+                              className="rounded-full bg-panel-2 px-2 py-0.5 text-[11px] text-txt-2"
+                            >
+                              {w.display_name ?? w.worker_id}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </Td>
+                    <Td>
+                      <span
+                        className={
+                          row.warnings.outstanding > 0 ? "font-semibold text-amber-500" : "text-txt-2"
+                        }
+                      >
+                        {row.warnings.outstanding}
+                      </span>
+                      <span className="text-txt-3"> / {row.warnings.today} / {row.warnings.total}</span>
+                    </Td>
+                    <Td className="text-right font-mono">{row.risk_score.toFixed(1)}</Td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <Td colSpan={5}>
+                    <Empty>No zones to report on yet.</Empty>
+                  </Td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </Card>
+      )}
 
       <SectionTitle>Add a zone</SectionTitle>
       <Card className="mb-6 px-4 py-4">

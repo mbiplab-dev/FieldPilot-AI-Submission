@@ -5,7 +5,6 @@ import { PageHeader } from "@/components/PageHeader";
 import {
   Badge,
   Card,
-  Delta,
   Empty,
   ErrorState,
   LiveChip,
@@ -16,16 +15,7 @@ import {
   StatTile,
   StateChip,
 } from "@/components/ui";
-import {
-  api,
-  fmtDelta,
-  fmtMetric,
-  fmtPercent,
-  timeAgo,
-  type Alert,
-  type Inspection,
-  type RFIStatus,
-} from "@/lib/api";
+import { api, timeAgo, type Alert, type Inspection, type RFIStatus } from "@/lib/api";
 import { usePoll } from "@/lib/usePoll";
 import { useLiveFeed } from "@/lib/useLiveFeed";
 
@@ -51,16 +41,14 @@ export default function OverviewPage() {
     async () => {
       // Alerts + workers are the backbone of this page — let them fail loudly.
       const [alerts, workers] = await Promise.all([api.alerts({ limit: "500" }), api.workers()]);
-      const [notes, rfis, insp, evStats, health, learning, feedback] = await Promise.all([
+      const [notes, rfis, insp, evStats, health] = await Promise.all([
         soft(api.notifications()),
         soft(api.rfis({ limit: 20 })),
         soft(api.inspections()),
         soft(api.eventStats()),
         soft(api.health()),
-        soft(api.latestLearningRun()),
-        soft(api.feedbackStats()),
       ]);
-      return { alerts, workers, notes, rfis, insp, evStats, health, learning, feedback };
+      return { alerts, workers, notes, rfis, insp, evStats, health };
     },
     live.connected ? 20000 : 5000,
     [live.connected],
@@ -105,9 +93,6 @@ export default function OverviewPage() {
   const pendingRfis =
     data.health?.rfis_pending ?? rfis.filter((r) => r.status === "pending_review").length;
   const broadcast = data.health?.broadcast ?? null;
-  const rag = data.health?.rag ?? null;
-  const learning = data.learning;
-  const feedback = data.feedback;
 
   return (
     <div className="p-6">
@@ -143,68 +128,16 @@ export default function OverviewPage() {
         />
         <StatTile value={evTotal} label="Events logged" />
         <StatTile value={pendingRfis} label="RFIs pending review" accent={pendingRfis ? "#f59e0b" : "#10b981"} />
-      </div>
-
-      <SectionTitle>Learning loop &amp; platform</SectionTitle>
-      <div className="grid grid-cols-2 gap-3.5 md:grid-cols-4">
-        <StatTile
-          value={
-            learning ? <Delta value={learning.delta} text={fmtDelta(learning.delta)} /> : "–"
-          }
-          label={
-            learning
-              ? `mAP50 ${fmtMetric(learning.map50_before)} → ${fmtMetric(learning.map50_after)}`
-              : "No training run yet"
-          }
-          accent={
-            learning?.delta && learning.delta > 0
-              ? "#10b981"
-              : learning?.delta && learning.delta < 0
-                ? "#ef4444"
-                : undefined
-          }
-        />
-        <StatTile
-          value={feedback ? fmtPercent(feedback.approval_rate) : "–"}
-          label={
-            feedback
-              ? `Approval rate · ${feedback.total} reviewed, ${feedback.unconsumed} untrained`
-              : "Feedback stats unavailable"
-          }
-          accent="#2f6fdd"
-        />
         <StatTile
           value={broadcast ? broadcast.connected : "–"}
           label={
             broadcast
-              ? `Live clients · ${broadcast.devices} device(s), ${broadcast.dashboards} dashboard(s)`
-              : "Broadcast stats unavailable"
+              ? `Live connections · ${broadcast.devices} worker(s), ${broadcast.dashboards} dashboard(s)`
+              : "Live connections unavailable"
           }
           accent={broadcast && broadcast.connected > 0 ? "#10b981" : "#f59e0b"}
         />
-        <StatTile
-          value={rag ? rag.indexed_chunks : "–"}
-          label={
-            rag
-              ? `Spec chunks · ${rag.available ? "index up" : "index down"}, ${
-                  rag.embeddings.semantic ? "semantic" : "lexical"
-                }`
-              : "RAG status unavailable"
-          }
-          accent={rag?.available ? (rag.embeddings.semantic ? "#10b981" : "#f59e0b") : "#ef4444"}
-        />
       </div>
-
-      {learning && (learning.status === "blocked" || learning.status === "failed") ? (
-        <div className="mt-4">
-          <Note tone={learning.status === "failed" ? "bad" : "warn"} title={`Last training run ${learning.status}`}>
-            {learning.message || "No detail provided."}{" "}
-            <Link href="/learning" className="font-semibold underline">
-              Open the learning page
-            </Link>
-          </Note>
-        </div>
-      ) : null}
 
       <div className="mt-7 grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div>
