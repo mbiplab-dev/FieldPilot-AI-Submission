@@ -100,6 +100,7 @@ export interface AuthUser {
   display_name: string;
   role: UserRole;
   worker_id: string | null;
+  active?: boolean;
 }
 
 export interface LoginInput {
@@ -110,6 +111,14 @@ export interface LoginInput {
 export interface LoginResult {
   token: string;
   user: AuthUser;
+}
+
+export interface CreateUserInput {
+  username: string;
+  password: string;
+  role: UserRole;
+  display_name?: string;
+  worker_id?: string;
 }
 
 /* ------------------------------- types ------------------------------- */
@@ -518,6 +527,8 @@ export const api = {
   login: (input: LoginInput) => post<LoginResult>("/auth/login", input),
   logout: () => post<{ ok: boolean }>("/auth/logout"),
   me: () => get<AuthUser>("/auth/me"),
+  users: () => get<{ users: AuthUser[] }>("/auth/users"),
+  createUser: (input: CreateUserInput) => post<AuthUser>("/auth/users", input),
 
   health: () => get<Health>("/health"),
 
