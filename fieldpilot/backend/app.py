@@ -27,11 +27,34 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from fieldpilot.auth import (
+    SESSIONS_TABLE,
+    USERS_TABLE,
+    AuthError,
+    AuthService,
+    Forbidden,
+    InvalidCredentials,
+    NotAuthenticated,
+)
+from fieldpilot.auth.service import require_role, require_site_manager, require_user
 from fieldpilot.backend.service import Orchestrator
 from fieldpilot.backend.settings import SETTINGS_TABLE, TRACKED_ITEMS, SettingsService
 from fieldpilot.backend.store import create_platform_store
@@ -51,6 +74,14 @@ from fieldpilot.rules.engine import Rule, RuleEngine, default_rules
 from fieldpilot.storage import DocStore
 from fieldpilot.triggers.cache import create_cache
 from fieldpilot.triggers.engine import TriggerEngine
+from fieldpilot.workforce import (
+    OCCUPANCY_TABLE,
+    QUESTIONS_TABLE,
+    OccupancyMismatchError,
+    OccupancyService,
+    QuestionError,
+    QuestionService,
+)
 from fieldpilot.zones import ZONES_TABLE, ZoneService
 
 log = get_logger("fieldpilot.backend")
@@ -122,6 +153,33 @@ class MonitoringIn(BaseModel):
 class ModelSelectIn(BaseModel):
     model_key: str
     download: bool = True
+
+
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
+class CreateUserIn(BaseModel):
+    username: str
+    password: str
+    role: str = "worker"
+    display_name: str = ""
+    worker_id: str | None = None
+
+
+class QuestionReplyIn(BaseModel):
+    reply: str
+
+
+def _question_out(question: dict[str, Any]) -> dict[str, Any]:
+    """Wire shape for a question: expose the photo as a URL, never a filesystem path."""
+
+    out = dict(question)
+    path = out.pop("image_path", None)
+    out["image_url"] = f"/uploads/{Path(path).name}" if path else None
+    out.setdefault("citations", [])
+    return out
 
 
 def _sev_penalty(severity: str) -> int:
@@ -212,6 +270,21 @@ def create_app(cfg: Config) -> FastAPI:
     settings = SettingsService(docs, bus)
     models_dir = str(cfg.get("detection.models_dir", "models"))
 
+    # --- people: who is signed in, where they are, and what they are asking -----------
+    auth = AuthService(docs, token_ttl_s=float(cfg.get("auth.token_ttl_s", 43200)))
+    occupancy = OccupancyService(docs)
+    uploads_dir = str(cfg.get("storage.uploads_dir", "data/uploads"))
+    max_upload = int(cfg.get("storage.max_upload_bytes", 8 * 1024 * 1024))
+    questions = QuestionService(
+        docs,
+        index=blueprints,
+        ollama_host=ollama_host,
+        model=str(cfg.get("reasoning.llm_model", "llama3.2:3b")),
+        project_id=project_id,
+        uploads_dir=uploads_dir,
+        llm_enabled=bool(cfg.get("llm.enabled", False)) or bool(cfg.get("questions.llm", True)),
+    )
+
     orchestrator = Orchestrator(
         bus=bus, events=events_repo, store=store,
         triggers=triggers, rules=rules_engine, notifications=notifications,
@@ -226,8 +299,14 @@ def create_app(cfg: Config) -> FastAPI:
         await bus.start()
         await events_repo.start()
         await store.start()
-        await docs.start([ZONES_TABLE, FEEDBACK_TABLE, LEARNING_RUNS_TABLE, SETTINGS_TABLE])
+        await docs.start([
+            ZONES_TABLE, FEEDBACK_TABLE, LEARNING_RUNS_TABLE, SETTINGS_TABLE,
+            USERS_TABLE, SESSIONS_TABLE, OCCUPANCY_TABLE, QUESTIONS_TABLE,
+        ])
         await zones.start()
+        await auth.start(seed=None if cfg.get("auth.seed_demo_users", True) else [])
+        await occupancy.start()
+        await questions.start()
         await settings.start({
             "tracked_items": {
                 item: bool((cfg.get("safety.tracked_items") or {}).get(item, item in ("helmet", "vest")))
@@ -278,11 +357,304 @@ def create_app(cfg: Config) -> FastAPI:
         allow_headers=["*"],
     )
 
+    # Auth failures are raised by the framework-agnostic auth service; translate them here so
+    # that module never has to import FastAPI.
+    @app.exception_handler(NotAuthenticated)
+    async def _unauthenticated(_request, exc: NotAuthenticated):
+        return JSONResponse(
+            {"detail": str(exc) or "authentication required"},
+            status_code=401,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    @app.exception_handler(InvalidCredentials)
+    async def _bad_credentials(_request, exc: InvalidCredentials):
+        return JSONResponse({"detail": "invalid username or password"}, status_code=401)
+
+    @app.exception_handler(Forbidden)
+    async def _forbidden(_request, exc: Forbidden):
+        return JSONResponse({"detail": str(exc) or "not permitted for your role"}, status_code=403)
+
+    @app.exception_handler(AuthError)
+    async def _auth_error(_request, exc: AuthError):
+        return JSONResponse({"detail": str(exc)}, status_code=400)
+
     # serve captured alert snapshots (the annotated bbox JPEGs the edge writes)
     import os
 
     os.makedirs("data/alerts", exist_ok=True)
     app.mount("/images", StaticFiles(directory="data/alerts"), name="alert-images")
+    # worker-submitted photos (question attachments, manual hazard reports)
+    os.makedirs(uploads_dir, exist_ok=True)
+    app.mount("/uploads", StaticFiles(directory=uploads_dir), name="worker-uploads")
+
+    any_user = require_user(auth)
+    manager_only = require_site_manager(auth)
+    worker_only = require_role(auth, "worker")
+
+    async def _save_upload(upload: UploadFile | None) -> str | None:
+        """Persist a worker photo, bounded in size, with a generated name.
+
+        The client's filename is never trusted for the stored name — only its extension, from an
+        allowlist — so an upload cannot choose where it lands or what it shadows.
+        """
+
+        if upload is None or not upload.filename:
+            return None
+        suffix = Path(upload.filename).suffix.lower()
+        if suffix not in (".jpg", ".jpeg", ".png", ".webp"):
+            raise HTTPException(400, f"unsupported image type {suffix!r}")
+        data = await upload.read(max_upload + 1)
+        if len(data) > max_upload:
+            raise HTTPException(413, f"image exceeds the {max_upload // 1024 // 1024} MiB limit")
+        if not data:
+            return None
+        name = f"{uuid.uuid4().hex}{suffix}"
+        Path(uploads_dir).mkdir(parents=True, exist_ok=True)
+        (Path(uploads_dir) / name).write_bytes(data)
+        return name
+
+    # ---------------------------------------------------------------- auth
+
+    @app.post("/auth/login")
+    async def login(body: LoginIn):
+        user, token = await auth.authenticate(body.username, body.password)
+        log.info("login: %s (%s)", user["username"], user["role"])
+        return {"token": token, "user": user}
+
+    @app.post("/auth/logout")
+    async def logout(authorization: str | None = Header(default=None, alias="Authorization")):
+        from fieldpilot.auth import bearer_token
+
+        token = bearer_token(authorization)
+        return {"ok": bool(token) and await auth.logout(token)}
+
+    @app.get("/auth/me")
+    async def whoami(user: dict[str, Any] = Depends(any_user)):
+        return user
+
+    @app.get("/auth/users")
+    async def list_users(_: dict[str, Any] = Depends(manager_only)):
+        return {"users": await auth.list_users()}
+
+    @app.post("/auth/users", status_code=201)
+    async def create_user(body: CreateUserIn, _: dict[str, Any] = Depends(manager_only)):
+        try:
+            return await auth.create_user(
+                username=body.username, password=body.password, role=body.role,
+                display_name=body.display_name, worker_id=body.worker_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    # ---------------------------------------------------------------- worker: me
+
+    def _worker_id(user: dict[str, Any]) -> str:
+        wid = user.get("worker_id")
+        if not wid:
+            raise HTTPException(
+                409,
+                "this account is not linked to a worker id, so it has no site presence. "
+                "Ask a site manager to set one.",
+            )
+        return str(wid)
+
+    @app.get("/me/alerts")
+    async def my_alerts(
+        limit: int = Query(default=100, le=500),
+        user: dict[str, Any] = Depends(worker_only),
+    ):
+        """Only this worker's alerts. Scoped server-side, not filtered in the client."""
+
+        return {"alerts": await store.list_alerts(worker_id=_worker_id(user), limit=limit)}
+
+    @app.post("/me/alerts", status_code=202)
+    async def raise_alert(
+        event_type: str = Form(...),
+        severity: str = Form("high"),
+        message: str = Form(""),
+        zone: str | None = Form(None),
+        image: UploadFile | None = File(None),
+        user: dict[str, Any] = Depends(worker_only),
+    ):
+        """A worker reports a hazard by hand.
+
+        It enters the platform as a normal canonical event, so it goes through triggers, rules and
+        notifications exactly like a machine detection — a human report is not a lesser signal.
+        """
+
+        worker_id = _worker_id(user)
+        stored_name = await _save_upload(image)
+        current = await occupancy.current_zone(worker_id)
+        event = Event(
+            event_type=event_type if event_type in
+            ("ppe", "fall", "proximity", "crack", "inspection", "gas", "fire") else "inspection",
+            camera_id=f"worker-{worker_id}",
+            worker_id=worker_id,
+            zone=zone or (current or {}).get("zone_id"),
+            severity=severity if severity in ("low", "medium", "high", "critical") else "high",
+            confidence=1.0,          # a person saw it; this is not a model score
+            payload={
+                "message": (message or "Hazard reported by worker").strip()[:500],
+                "reported_by": worker_id,
+                "reporter_name": user.get("display_name") or user.get("username"),
+                "source": "worker_report",
+                "dedup_key": f"worker-report:{uuid.uuid4().hex[:8]}",
+                "image_url": f"/uploads/{stored_name}" if stored_name else None,
+            },
+            image_url=f"/uploads/{stored_name}" if stored_name else None,
+        )
+        await publish_event(bus, event)
+        log.info("worker %s reported a %s hazard in %s", worker_id, event.event_type, event.zone)
+        return {"ok": True, "event_id": event.event_id, "zone": event.zone,
+                "image_url": event.image_url}
+
+    @app.get("/me/zone")
+    async def my_zone(user: dict[str, Any] = Depends(worker_only)):
+        current = await occupancy.current_zone(_worker_id(user))
+        if current is None:
+            return {"occupancy": None}
+        zone = await zones.get(str(current.get("zone_id")))
+        return {"occupancy": {**current, "zone_name": (zone or {}).get("name")}}
+
+    # ---------------------------------------------------------------- zone presence
+
+    @app.get("/zones/occupancy")
+    async def zone_occupancy(_: dict[str, Any] = Depends(any_user)):
+        """Who is in which zone, and which zones carry the most warnings."""
+
+        report = await occupancy.occupancy_report(
+            await zones.list(), await store.list_alerts(limit=1000)
+        )
+        names = {u.get("worker_id"): u.get("display_name") for u in await auth.list_users()}
+        for row in report:
+            for w in row.get("workers", []):
+                w["display_name"] = names.get(w.get("worker_id"))
+        return {"zones": report}
+
+    @app.post("/zones/{zone_id}/enter")
+    async def enter_zone(zone_id: str, user: dict[str, Any] = Depends(worker_only)):
+        if await zones.get(zone_id) is None:
+            raise HTTPException(404, "zone not found")
+        worker_id = _worker_id(user)
+        result = await occupancy.enter(worker_id, zone_id)
+        await hub.publish("presence", {"worker_id": worker_id, "zone_id": zone_id,
+                                       "event": "enter", **result}, zone=zone_id)
+        # flatten to the shape the clients are written against: entered_at at the top level, and
+        # `closed_previous` naming what actually happened when a worker moves between zones
+        occ = result.get("occupancy") or {}
+        closed = result.get("closed")
+        return {
+            "ok": True,
+            "zone_id": zone_id,
+            "entered_at": occ.get("entered_at"),
+            "already_here": not result.get("created", True),
+            "closed_previous": (
+                {"zone_id": closed.get("zone_id"), "duration_s": closed.get("duration_s")}
+                if closed else None
+            ),
+        }
+
+    @app.post("/zones/{zone_id}/leave")
+    async def leave_zone(zone_id: str, user: dict[str, Any] = Depends(worker_only)):
+        worker_id = _worker_id(user)
+        try:
+            result = await occupancy.leave(worker_id, zone_id)
+        except OccupancyMismatchError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if result is None:
+            raise HTTPException(409, "you are not checked in to a zone")
+        await hub.publish("presence", {"worker_id": worker_id, "zone_id": zone_id,
+                                       "event": "leave", **result}, zone=zone_id)
+        return {
+            "ok": True,
+            "zone_id": result.get("zone_id"),
+            "left_at": result.get("left_at"),
+            "duration_s": result.get("duration_s"),
+        }
+
+    # ---------------------------------------------------------------- worker questions
+
+    @app.post("/questions", status_code=201)
+    async def ask_question(
+        background: BackgroundTasks,
+        text: str = Form(...),
+        zone: str | None = Form(None),
+        image: UploadFile | None = File(None),
+        user: dict[str, Any] = Depends(worker_only),
+    ):
+        """Ask about something on site. Answered by the LLM *and* routed to the site manager."""
+
+        worker_id = _worker_id(user)
+        stored_name = await _save_upload(image)
+        current = await occupancy.current_zone(worker_id)
+        try:
+            question = await questions.ask(
+                worker_id=worker_id,
+                text=text,
+                zone=zone or (current or {}).get("zone_id"),
+                image_path=stored_name,
+            )
+        except QuestionError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+        # the LLM runs after the response: the worker is not kept waiting on a model
+        background.add_task(questions.answer_with_llm, question["question_id"])
+        # and the manager is told regardless of what the model says
+        await notifications.notify(
+            dedup_key=f"question:{question['question_id']}",
+            subject=f"Question from {user.get('display_name') or worker_id}",
+            body=question["text"][:280],
+            severity="low",
+            channels=["dashboard"],
+            meta={"question": question},
+        )
+        await hub.publish("question", question, audience="dashboard")
+        return _question_out(question)
+
+    @app.get("/questions/stats")
+    async def question_stats(_: dict[str, Any] = Depends(any_user)):
+        return await questions.stats()
+
+    @app.get("/questions")
+    async def list_questions(
+        status: str | None = None,
+        zone: str | None = None,
+        limit: int = Query(default=100, le=500),
+        user: dict[str, Any] = Depends(any_user),
+    ):
+        """A worker sees only their own questions; a site manager sees every question."""
+
+        scope = user.get("worker_id") if user.get("role") == "worker" else None
+        rows = await questions.list(worker_id=scope, status=status, zone=zone, limit=limit)
+        return {"questions": [_question_out(q) for q in rows]}
+
+    @app.get("/questions/{question_id}")
+    async def get_question(question_id: str, user: dict[str, Any] = Depends(any_user)):
+        question = await questions.get(question_id)
+        if question is None:
+            raise HTTPException(404, "question not found")
+        if user.get("role") == "worker" and question.get("worker_id") != user.get("worker_id"):
+            raise HTTPException(403, "not your question")
+        return _question_out(question)
+
+    @app.post("/questions/{question_id}/reply")
+    async def reply_to_question(
+        question_id: str, body: QuestionReplyIn,
+        user: dict[str, Any] = Depends(manager_only),
+    ):
+        """The site manager's answer — the authoritative one."""
+
+        try:
+            updated = await questions.reply(
+                question_id, manager_id=str(user.get("user_id")), reply=body.reply,
+            )
+        except QuestionError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if updated is None:
+            raise HTTPException(404, "question not found")
+        await hub.publish("question", updated)
+        return _question_out(updated)
 
     # ---------------------------------------------------------------- events
 

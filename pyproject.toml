@@ -76,3 +76,19 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501"]  # line length handled by formatter; long config strings allowed
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency/parameter markers are *meant* to be called in argument defaults — that is
+# the framework's documented idiom, and the objects are immutable descriptors rather than shared
+# mutable state. Allow them instead of scattering per-line noqa over every endpoint.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Header",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Cookie",
+    "fastapi.Security",
+]
