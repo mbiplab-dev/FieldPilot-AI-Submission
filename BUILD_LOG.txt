@@ -6,7 +6,7 @@ Purpose : A running record of what exists, when it was built, why it is shaped
           by a person or by another LLM picking this repo up cold.
 Repo    : /home/biplab-dev/Projects/Hackathon/FieldPilot-AI
 Branch  : biplab
-Updated : 2026-08-03 22:15
+Updated : 2026-08-04 21:15
 Append  : newest section at the BOTTOM of "SESSION HISTORY". Do not rewrite
           history; add. Timestamps are local time.
 
@@ -617,6 +617,132 @@ Other honest gaps:
 
 * npm run format:check was already failing on pre-existing files before this
   session; running prettier --write would produce a repo-wide diff.
+
+* A long-running backend process does NOT pick up later edits to backend/
+  app.py — it is a plain uvicorn process, no --reload. If a route you just
+  added 404s, check whether the process serving :8100 predates the edit
+  before assuming the code is wrong. This cost real time in this session:
+  the backend had been running since before the auth/workforce wiring
+  existed, so curling it directly returned 404 on routes that were provably
+  present in the source. Restart it after any backend/app.py change.
+
+* This machine's desktop is KDE Plasma running natively on WAYLAND
+  (kwin_wayland), with DISPLAY=:1 as an XWayland compat layer, not a plain
+  X server. GTK picks the Wayland backend by default even when DISPLAY is
+  set, so a Flutter Linux desktop build renders into a Wayland surface that
+  X11 screenshot tools (ffmpeg x11grab, ImageMagick import) cannot see —
+  they capture a real window (confirmed via python-xlib: map_state=2,
+  correct geometry) but it paints black. Forcing GDK_BACKEND=x11 makes GTK
+  create an X11 window, but the window still renders black (likely an
+  EGL/GLX context mismatch between Flutter's renderer and the forced
+  backend) — tried both hardware and LIBGL_ALWAYS_SOFTWARE=1 GL, same
+  result. `flutter analyze` / `flutter test` / `flutter build` remain fully
+  reliable; a screenshot of the running Linux-desktop build does not work
+  in this environment and is not worth more time chasing. Verify visually
+  in Android Studio / a real device instead.
+
+================================================================================
+2026-08-04  SESSION — worker/manager login, Flutter worker app, occupancy + questions UI
+================================================================================
+Request: role-based login (worker sees only their own alerts; can check into/out of a zone;
+asks a question with a photo that goes to both the LLM and the site manager; has a dedicated
+raise-alert page); site manager sees which worker is in which zone and which zone has the most
+warnings; remove Learning and Blueprints from the manager UI (a site manager is a consumer of
+those subsystems' outcomes, not an operator); mirror the 10-agent reference architecture. Then,
+mid-session: also build a Flutter mobile app for the worker side specifically.
+
+--- BACKEND (auth + workforce) ---------------------------------------------------
+Three parallel agents (auth service, workforce domain, frontend) were all killed mid-task by a
+session rate limit, each having written roughly one file. Recovered by finishing the missing
+piece (fieldpilot/workforce/questions.py) and wiring everything into backend/app.py myself:
+  fieldpilot/auth/          users + sessions over storage.docstore. hashlib.scrypt with
+                            per-user salt + stored cost params; opaque tokens stored only as a
+                            hash; revoke-all-on-password-change; framework-agnostic AuthError
+                            subclasses (NotAuthenticated/Forbidden/InvalidCredentials) that
+                            app.py maps to 401/403. Stdlib only.
+  fieldpilot/workforce/
+    occupancy.py            zone check-in/out, one-open-occupancy invariant (entering a new
+                            zone auto-closes the old one), occupancy_report() aggregating
+                            alerts per zone into a deterministic, injectable-clock, worst-first
+                            risk ranking.
+    questions.py            ask() persists and returns immediately — the LLM is NEVER on the
+                            worker's critical path. answer_with_llm() runs after, zone-filtered
+                            exactly like reasoning/rag.py, citations from chunk metadata only.
+                            Degrades to an honest "answer unavailable" if Ollama is unreachable.
+New endpoints on backend/app.py: /auth/{login,logout,me,users}, /me/{alerts,zone},
+/zones/{id}/{enter,leave}, /zones/occupancy, /questions + sub-routes. A worker's manual hazard
+report becomes a real canonical Event through bus -> triggers -> rules, not a side channel.
+
+Bugs found and fixed:
+- set_tracked_items (from the earlier hrm-integration pass) resolved an all-unrecognised
+  payload to the empty set, silently disabling every PPE check — kept for reference above;
+  not touched again this session.
+- occupancy.enter()/leave() return a nested {occupancy, closed} shape; my first wiring exposed
+  that directly, but the frontend contract promises flat entered_at/closed_previous fields.
+  Found by an end-to-end script, not a unit test — the occupancy service itself was correct,
+  only the endpoint's flattening was missing. Fixed in app.py, not the service.
+pyproject.toml: allowlisted FastAPI's Depends/Query/Form/etc for ruff's bugbear check — calling
+them in argument defaults is the framework's documented idiom, not a mutable-default bug.
+51 new tests (test_worker_api.py). 455 total passing, ruff clean.
+
+--- FLUTTER WORKER APP (worker_app/) ----------------------------------------------
+User asked for a native mobile app for the worker side specifically, bottom-nav, proper UI.
+Flutter was not installed — installed the SDK, then had to fix the Android toolchain from
+scratch: SDK 35 -> 36, build-tools 28.0.3, licenses (yes | sdkmanager --licenses), JAVA_HOME
+(no system JDK existed at all; used Android Studio's bundled JBR at
+/opt/android-studio/jbr). Verified end-to-end with a real `flutter build apk --debug`
+before writing any app code — proof the toolchain worked, not just that files existed.
+
+App: bottom-nav shell (Alerts / Zone / Ask / Report) behind a login screen, mobile-only
+(Android — a Linux desktop target was tried for visual verification and abandoned, see the
+Wayland/GLX gotcha in §10). Portrait-locked. Talks to the backend contract above via a plain
+http-based ApiClient; session token held in an external store (Session extends ChangeNotifier)
+persisted to shared_preferences.
+
+Bugs `flutter analyze` caught before they shipped:
+- ApiException is defined in models.dart, not api_client.dart. Three files imported only
+  api_client.dart and used ApiException anyway — an error, not a warning, because nothing
+  actually re-exports it. Fixed by importing models.dart where the type is used.
+- context.read<Session>() called inside a catchError callback that runs AFTER the widget may
+  have been disposed (the async gap the linter's use_build_context_synchronously rule exists
+  for) — a real crash risk ("looking up a deactivated widget's ancestor"), not lint noise.
+  Fixed by capturing the Session reference once, synchronously, before the gap, since Session
+  itself is a stable object that needs no context to use later.
+0 issues (flutter analyze), 12 passing tests (flutter test), both `flutter build apk --debug`
+and `flutter build linux --debug` succeed. 2165 lines of Dart.
+
+--- FRONTEND (Next.js manager UI) --------------------------------------------------
+Deleted /learning and /blueprints entirely (pages + Sidebar entries + the Overview page's
+platform-internals stat section) — those subsystems keep running server-side; a site manager
+consumes their outcomes (RFIs, promoted models) and was never meant to operate the pipeline.
+Added: src/lib/session.ts (external store, pre-existed from a killed agent, fully correct —
+reused as-is) + src/lib/useSession.ts (React binding) + src/components/AuthGate.tsx (gates
+every route behind a site_manager session; a worker CAN authenticate at the API level but is
+shown a plain notice instead of a broken dashboard) + src/app/login/page.tsx + src/app/
+questions/page.tsx (the manager's inbox: photo, question, the LLM's grounded-or-not answer
+with citations, a reply box that is the authoritative one) + an occupancy & risk panel on
+/zones (who is present per zone, warnings, worst-first rank, from GET /zones/occupancy).
+api.ts's req() now attaches the bearer token to every call and clears the session on 401.
+next.config.ts gained the /uploads rewrite worker photos need (existed for alert snapshots
+under /img already, not for this new path). Lint + tsc + build clean, 13 routes.
+
+--- VERIFICATION: caught my own stale-process mistake ------------------------------
+First end-to-end attempt through the real Next.js proxy 404'd on /auth/login. Traced it to the
+backend process still running the PRE-auth-wiring binary (it had been up since earlier in the
+session, before any of fieldpilot/auth or the new app.py routes existed — plain uvicorn has no
+--reload). Confirmed via the source (`grep '"/auth/login"' fieldpilot/backend/app.py` found it)
+vs the live process (`curl :8100/openapi.json` did not). Restarted the backend; re-ran the same
+checks through localhost:3000/api/* exactly as the browser's fetch() would:
+  login -> token; wrong password -> 401; /auth/me identity; a worker account logging in returns
+  role=worker (frontend decides what to do with that, not the API); GET /zones/occupancy
+  ranked worst-first with real accumulated data (zone-a rank 1, risk 100.0, 110 warnings from
+  this session's own testing); a zone-b worker's question answered by the LLM grounded in
+  zone-b's OWN clause 7.1 with zero zone-a citations (checked explicitly — no leak); the
+  manager's reply landing and visible to the worker; a worker attempting to reply as manager
+  correctly refused with 403; unauthenticated calls to gated endpoints -> 401.
+
+Final state: backend 455 tests / ruff clean, frontend lint+tsc+build clean (13 routes),
+Flutter analyze+test clean (both platform builds succeed). Commit 9a63515.
 
 ================================================================================
 END OF LOG — append new sessions to §5, newest at the bottom.
