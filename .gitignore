@@ -19,6 +19,8 @@ data/val_set/*
 # alert snapshots the edge captures and the backend serves at /images/<id>.jpg — these are
 # uploaded site imagery: unbounded in size and potentially identifying, so never committed.
 data/alerts/
+# photos workers upload with questions and manual hazard reports — user-submitted content
+data/uploads/
 models/*.pt
 models/*.tflite
 models/*.onnx

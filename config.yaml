@@ -127,6 +127,17 @@ learning:
 storage:
   sqlite_path: data/fieldpilot.db      # local event store + offline store-and-forward queue
   central_api: null                    # backend base URL; null → offline-only
+  # photos uploaded by workers (question attachments, manual hazard reports). Served read-only
+  # at /uploads/<name>. Kept separate from data/alerts/ (machine-captured snapshots) so the two
+  # retention policies can differ — worker uploads are user-submitted content.
+  uploads_dir: data/uploads
+  max_upload_bytes: 8388608            # 8 MiB — a phone photo, not a video
+
+auth:
+  # Worker and site-manager accounts. Seeded demo credentials are created ONLY when the users
+  # table is empty, and the service logs a warning about them — change them before any real use.
+  token_ttl_s: 43200                   # 12 h session lifetime
+  seed_demo_users: true                # set false to require explicit account creation
 
 # --- Event-driven platform (Model → Event → Rules → Notification → Dashboard) --------------
 events:
