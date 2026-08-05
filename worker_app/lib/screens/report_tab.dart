@@ -37,7 +37,7 @@ class ReportTab extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Report a hazard'),
-        actions: const [AccountAction(), SizedBox(width: 4)],
+        actions: const [VoiceAction(), AccountAction(), SizedBox(width: 4)],
       ),
       body: Padding(
         padding: const EdgeInsets.all(16),

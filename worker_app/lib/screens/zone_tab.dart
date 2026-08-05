@@ -40,9 +40,14 @@ class _ZoneTabState extends State<ZoneTab> {
     final session = context.read<Session>();
     try {
       final results = await Future.wait([session.api.myZone(), session.api.zones()]);
+      final current = results[0] as ZoneOccupancy?;
+      // Publish the zone to the session even if this widget is gone: the live socket is scoped by
+      // it, so a check-in that updated the server but not the session would leave the worker
+      // hearing another zone's advisories.
+      session.setCurrentZone(current?.zoneId);
       if (!mounted) return;
       setState(() {
-        _current = results[0] as ZoneOccupancy?;
+        _current = current;
         _zones = results[1] as List<ZoneInfo>;
         _loading = false;
       });
@@ -105,7 +110,7 @@ class _ZoneTabState extends State<ZoneTab> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Zone check-in'),
-        actions: const [AccountAction(), SizedBox(width: 4)],
+        actions: const [VoiceAction(), AccountAction(), SizedBox(width: 4)],
       ),
       body: RefreshIndicator(
         onRefresh: _load,

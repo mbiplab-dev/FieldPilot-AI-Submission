@@ -39,6 +39,8 @@ dependencies:
   image_picker: ^1.2.3
   intl: ^0.20.3
   provider: ^6.1.5+1
+  flutter_tts: ^4.2.5
+  web_socket_channel: ^3.0.3
 
 dev_dependencies:
   flutter_test:

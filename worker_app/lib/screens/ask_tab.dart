@@ -95,7 +95,7 @@ class _AskTabState extends State<AskTab> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Ask a question'),
-        actions: const [AccountAction(), SizedBox(width: 4)],
+        actions: const [VoiceAction(), AccountAction(), SizedBox(width: 4)],
       ),
       body: Column(
         children: [

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../core/live_feed.dart';
 import '../core/models.dart';
 import '../core/session.dart';
 import '../widgets/common.dart';
@@ -16,11 +17,36 @@ class AlertsTab extends StatefulWidget {
 
 class _AlertsTabState extends State<AlertsTab> {
   late Future<List<Alert>> _future;
+  LiveFeed? _feed;
+  double _lastHandledTs = 0;
 
   @override
   void initState() {
     super.initState();
     _load();
+    // Deferred: `context.read` is not legal during initState.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final feed = context.read<LiveFeed>();
+      _feed = feed;
+      feed.addListener(_onLiveFrame);
+    });
+  }
+
+  /// A pushed alert about *this* worker means `/me/alerts` has changed — refetch rather than trying
+  /// to splice the socket payload into the list, so the server stays the single source of truth.
+  void _onLiveFrame() {
+    final last = _feed?.last;
+    if (last == null || last.topic != 'alert') return;
+    if (last.ts <= _lastHandledTs) return;
+    _lastHandledTs = last.ts;
+    if (mounted) setState(_load);
+  }
+
+  @override
+  void dispose() {
+    _feed?.removeListener(_onLiveFrame);
+    super.dispose();
   }
 
   void _load() {
@@ -41,10 +67,23 @@ class _AlertsTabState extends State<AlertsTab> {
   @override
   Widget build(BuildContext context) {
     final user = context.watch<Session>().user;
+    // Advisories are pushed, not stored against this worker, so `/me/alerts` will never contain
+    // them. Without this the worker would *hear* "a worker is missing a hard hat in your zone" and
+    // find nothing on screen explaining it.
+    final advisories = context
+        .watch<LiveFeed>()
+        .frames
+        .where((f) => f.topic == 'advisory')
+        .take(3)
+        .toList();
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('My alerts'),
         actions: [
+          const LiveDot(),
+          const SizedBox(width: 6),
+          const VoiceAction(),
           IconButton(icon: const Icon(Icons.refresh), onPressed: _refresh),
           const AccountAction(),
           const SizedBox(width: 4),
@@ -65,7 +104,8 @@ class _AlertsTabState extends State<AlertsTab> {
               ]);
             }
             final alerts = snapshot.data ?? const [];
-            if (alerts.isEmpty) {
+
+            if (alerts.isEmpty && advisories.isEmpty) {
               return ListView(children: [
                 const SizedBox(height: 80),
                 EmptyState(
@@ -77,14 +117,103 @@ class _AlertsTabState extends State<AlertsTab> {
                 ),
               ]);
             }
-            return ListView.separated(
+
+            return ListView(
               padding: const EdgeInsets.all(12),
-              itemCount: alerts.length,
-              separatorBuilder: (_, _) => const SizedBox(height: 8),
-              itemBuilder: (context, i) => _AlertCard(alert: alerts[i]),
+              children: [
+                if (advisories.isNotEmpty) ...[
+                  _SectionLabel(
+                    icon: Icons.hearing_rounded,
+                    label: 'Heard in your zone',
+                  ),
+                  const SizedBox(height: 8),
+                  ...advisories.map((f) => Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: _AdvisoryCard(frame: f),
+                      )),
+                  const SizedBox(height: 12),
+                  if (alerts.isNotEmpty)
+                    const _SectionLabel(
+                      icon: Icons.notifications_active_outlined,
+                      label: 'Raised against you',
+                    ),
+                  const SizedBox(height: 8),
+                ],
+                ...alerts.map((a) => Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: _AlertCard(alert: a),
+                    )),
+              ],
             );
           },
         ),
+      ),
+    );
+  }
+}
+
+class _SectionLabel extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  const _SectionLabel({required this.icon, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Row(
+      children: [
+        Icon(icon, size: 15, color: theme.colorScheme.onSurfaceVariant),
+        const SizedBox(width: 6),
+        Text(
+          label.toUpperCase(),
+          style: theme.textTheme.labelSmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.6,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// A zone advisory about a colleague's hazard — shows the exact sentence that was spoken, so a
+/// worker who missed it over site noise can read it back.
+class _AdvisoryCard extends StatelessWidget {
+  final LiveFrame frame;
+  const _AdvisoryCard({required this.frame});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final text = frame.speech ?? frame.message ?? 'Advisory in your zone.';
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.secondaryContainer.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.campaign_outlined, size: 18, color: theme.colorScheme.onSecondaryContainer),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(text, style: theme.textTheme.bodyMedium),
+                const SizedBox(height: 3),
+                Text(
+                  timeAgo(frame.ts),
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

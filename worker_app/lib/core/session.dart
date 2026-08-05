@@ -23,6 +23,13 @@ class Session extends ChangeNotifier {
   WorkerUser? user;
   bool loading = true; // true until the stored token (if any) has been checked
 
+  /// The zone this worker is currently checked into, or null.
+  ///
+  /// Held here rather than only inside the Zone tab because the live socket is scoped by zone —
+  /// the hub decides which colleagues' advisories reach this phone from the zone it registered.
+  /// Keeping it in the session is what lets the socket follow the worker around the site.
+  String? currentZoneId;
+
   ApiClient get api => ApiClient(baseUrl: serverUrl, token: _token);
 
   bool get isSignedIn => _token != null && user != null;
@@ -42,6 +49,13 @@ class Session extends ChangeNotifier {
       }
     }
     loading = false;
+    notifyListeners();
+  }
+
+  /// Reported by the Zone tab after every check-in/out, so the live socket can re-scope.
+  void setCurrentZone(String? zoneId) {
+    if (currentZoneId == zoneId) return;
+    currentZoneId = zoneId;
     notifyListeners();
   }
 
@@ -65,6 +79,7 @@ class Session extends ChangeNotifier {
     final client = api;
     _token = null;
     user = null;
+    currentZoneId = null;
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_tokenKey);
     notifyListeners();
@@ -76,6 +91,7 @@ class Session extends ChangeNotifier {
     if (_token == null) return;
     _token = null;
     user = null;
+    currentZoneId = null;
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_tokenKey);
     notifyListeners();

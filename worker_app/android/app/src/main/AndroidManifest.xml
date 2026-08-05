@@ -45,5 +45,12 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
+        <!-- Required by flutter_tts on Android 11+ (API 30). Package-visibility rules hide the
+             system text-to-speech engine unless it is declared here, and without it TTS resolves
+             to no engine and fails silently — no exception, just no speech. Spoken alerts are the
+             product's core promise, so this declaration is load-bearing, not boilerplate. -->
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE"/>
+        </intent>
     </queries>
 </manifest>
