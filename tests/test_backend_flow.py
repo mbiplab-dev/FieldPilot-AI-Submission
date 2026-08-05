@@ -227,6 +227,98 @@ async def test_one_hazard_is_spoken_to_three_audiences_in_three_voices(tmp_path)
         await store.stop()
 
 
+async def test_the_spoken_alert_does_not_wait_for_a_slow_rule_action(tmp_path):
+    """Warning a human must not queue behind paperwork.
+
+    `generate_rfi` awaits an LLM draft. On a cold model that is seconds, and for a while it sat
+    ahead of the broadcast in `handle_event`, so a critical "stop work" was delayed by an RFI that
+    no one needed in real time. A slow drafter here must not delay the spoken alert.
+    """
+
+    drafting_started = asyncio.Event()
+    release_draft = asyncio.Event()
+
+    class Drafted:
+        def to_record(self, extra=None):
+            return {
+                "rfi_id": "rfi-slow-1",
+                "event_id": "e-1",
+                "title": "Rebar spacing deviation",
+                "summary": "drafted",
+                "body": "drafted",
+                "priority": "normal",
+                "zone": "zone-a",
+                "status": "pending_review",
+                "citation": None,
+                "created_at": 1.0,
+                "payload": {"grounded": True, **(extra or {})},
+            }
+
+    class SlowDrafter:
+        """Stands in for an LLM that has to load a model before it can answer."""
+
+        async def draft(self, **kwargs):
+            drafting_started.set()
+            await release_draft.wait()
+            return Drafted()
+
+    bus = InMemoryEventBus()
+    cache = InMemoryTriggerCache()
+    events = SQLiteEventRepository(str(tmp_path / "events.db"))
+    store = SQLitePlatformStore(str(tmp_path / "platform.db"))
+    triggers = TriggerEngine(cache, bus, dedup_window_s=45, resolve_after_s=90,
+                             alert_sink=lambda a: store.upsert_alert(a))
+    notifications = NotificationService(store, cache, bus, dedup_window_s=300)
+    hub = BroadcastHub(bus)
+    orch = Orchestrator(bus=bus, events=events, store=store, triggers=triggers,
+                        rules=RuleEngine(default_rules()), notifications=notifications,
+                        hub=hub, rfi_drafter=SlowDrafter())
+    await bus.start()
+    await events.start()
+    await store.start()
+    await orch.start()
+    await hub.start()
+
+    phone = FakeSocket()
+    await hub.connect(phone, kind="device", zone="zone-a", worker_id="w-1")
+
+    try:
+        # deviation_mm > 20 is what trips the seeded rebar-deviation-rfi rule.
+        await publish_event(bus, Event(
+            worker_id="w-1", camera_id="cam-1", zone="zone-a",
+            event_type=EventType.MEASUREMENT, severity=Severity.HIGH, confidence=0.95,
+            payload={"element": "rebar_spacing", "measured_mm": 60.0, "spec_mm": 20.0,
+                     "deviation_mm": 40.0, "dedup_key": "slow-rfi"},
+        ))
+
+        # The worker hears it while the drafter is still blocked.
+        assert await until(lambda: len(phone.sent) == 1, timeout=3.0), (
+            "the spoken alert is queued behind the RFI draft"
+        )
+        assert phone.sent[0]["data"]["speech"] == (
+            "Stop work. Rebar spacing is 40 millimetres above spec."
+        )
+        # The drafter really was still blocked when the worker was warned.
+        assert drafting_started.is_set()
+        assert not release_draft.is_set()
+        assert await store.list_rfis() == []
+
+        # Let the paperwork finish — reordering must not have lost the RFI.
+        release_draft.set()
+        deadline = 3.0
+        while deadline > 0 and not await store.list_rfis():
+            await asyncio.sleep(0.02)
+            deadline -= 0.02
+        filed = await store.list_rfis()
+        assert len(filed) == 1
+        assert filed[0]["status"] == "pending_review"
+    finally:
+        release_draft.set()
+        await bus.stop()
+        await events.stop()
+        await store.stop()
+
+
 def test_bridge_converts_hazard_to_canonical_event():
     from fieldpilot.core.types import HazardEvent, HazardType
     from fieldpilot.core.types import Severity as EdgeSeverity

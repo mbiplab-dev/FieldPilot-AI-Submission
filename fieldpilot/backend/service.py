@@ -151,16 +151,21 @@ class Orchestrator:
                 log.info("alert %s CONFIRMED by LLM (conf=%.2f)",
                          alert.alert_id, verdict.confidence)
 
-        # 5. rules + baseline notification — only confirmed alerts reach people.
-        context = await self._build_context(event)
-        actions = self.rules.evaluate(event, context)
-        for action in actions:
-            await self._execute(action, event, alert)
-        await self._notify_new(alert)
-
-        # 6. push to open dashboards, and advise the *other* workers in this zone (PRD §4.4).
-        # Full alerts go to supervisory dashboards; worker devices get only the downgraded
-        # zone-scoped advisory, so a device is never a firehose of site-wide alert traffic.
+        # 5. TELL PEOPLE FIRST. Push to open dashboards, speak to the worker at risk, and advise
+        # the *other* workers in this zone (PRD §4.4). Full alerts go to supervisory dashboards;
+        # worker devices get only the downgraded zone-scoped advisory, so a device is never a
+        # firehose of site-wide alert traffic.
+        #
+        # This deliberately runs BEFORE the rules engine. Rule actions can block for a long time —
+        # `generate_rfi` awaits an LLM draft, which on a cold model is seconds, not milliseconds —
+        # and warning a human is the one thing on this path that is time-critical. An RFI is a
+        # document an engineer reads later; the spoken "stop work" is what keeps somebody from
+        # walking into an excavator, so it must not queue behind paperwork.
+        #
+        # Safe to reorder: rule actions raise notifications and file RFIs, but none of them mutate
+        # `alert`, so the broadcast payload is identical either way. (A rule may *describe* an
+        # escalation — "CRITICAL: no helmet in a danger zone" — but it does so in its own
+        # notification and leaves alert.severity alone.)
         if self.hub is not None:
             record = alert.to_dict()
             # Each audience hears the same fact phrased for them (see alerts/speech.py). The
@@ -179,6 +184,13 @@ class Orchestrator:
             await self.hub.advise_zone(
                 record, exclude_worker=alert.worker_id if spoke_to_worker else None
             )
+
+        # 6. rules + baseline notification — only confirmed alerts reach people.
+        context = await self._build_context(event)
+        actions = self.rules.evaluate(event, context)
+        for action in actions:
+            await self._execute(action, event, alert)
+        await self._notify_new(alert)
 
     async def _notify_new(self, alert: Alert) -> None:
         """Baseline dashboard notification for a confirmed NEW alert."""
