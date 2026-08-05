@@ -15,6 +15,7 @@ import time
 import uuid
 from typing import Any
 
+from fieldpilot.alerts.speech import spoken_phrase
 from fieldpilot.backend.store import PlatformStore
 from fieldpilot.broadcast import BroadcastHub
 from fieldpilot.events.bus import EventBus
@@ -161,10 +162,23 @@ class Orchestrator:
         # Full alerts go to supervisory dashboards; worker devices get only the downgraded
         # zone-scoped advisory, so a device is never a firehose of site-wide alert traffic.
         if self.hub is not None:
+            record = alert.to_dict()
+            # Each audience hears the same fact phrased for them (see alerts/speech.py). The
+            # phrase travels as data because the client — a browser or the worker's phone — is the
+            # machine with the speaker; the server's own `tts.py` would speak into an empty room.
             await self.hub.publish(
-                "alert", alert.to_dict(), zone=alert.zone, audience="dashboard"
+                "alert",
+                {**record, "speech": spoken_phrase(record, audience="dashboard")},
+                zone=alert.zone,
+                audience="dashboard",
             )
-            await self.hub.advise_zone(alert.to_dict())
+            # The worker at risk hears the primary, second-person verdict on their own device...
+            spoke_to_worker = await self.hub.alert_worker(record)
+            # ...and everyone *else* in the zone gets only the downgraded advisory, so the subject
+            # is not told twice about their own hazard.
+            await self.hub.advise_zone(
+                record, exclude_worker=alert.worker_id if spoke_to_worker else None
+            )
 
     async def _notify_new(self, alert: Alert) -> None:
         """Baseline dashboard notification for a confirmed NEW alert."""

@@ -283,6 +283,102 @@ async def test_a_failing_socket_is_dropped_and_counted(hub):
     assert hub.stats()["connected"] == 1
 
 
+# --------------------------------------------------------------------------- worker addressing
+
+
+def test_wants_addresses_one_named_worker():
+    mine = Client(ws=None, client_id="c1", kind="device", zone="zone-a", worker_id="w-9")
+    theirs = Client(ws=None, client_id="c2", kind="device", zone="zone-a", worker_id="w-1")
+    for client, expected in ((mine, True), (theirs, False)):
+        assert client.wants(
+            zone=None, audience="device", exclude=None, worker_id="w-9"
+        ) is expected
+
+
+def test_an_unidentified_device_never_matches_a_worker_addressed_message():
+    """A socket that did not say who it is must not receive somebody's personal alert."""
+
+    anon = Client(ws=None, client_id="c1", kind="device", zone="zone-a", worker_id=None)
+    assert anon.wants(zone=None, audience="device", exclude=None, worker_id="w-9") is False
+    # ...but it still receives ordinary zone traffic.
+    assert anon.wants(zone="zone-a", audience="device", exclude=None) is True
+
+
+def test_wants_can_exclude_the_subject_of_an_alert_by_worker_id():
+    subject = Client(ws=None, client_id="c1", kind="device", zone="zone-a", worker_id="w-9")
+    peer = Client(ws=None, client_id="c2", kind="device", zone="zone-a", worker_id="w-1")
+    assert subject.wants(
+        zone="zone-a", audience="device", exclude=None, exclude_worker="w-9"
+    ) is False
+    assert peer.wants(zone="zone-a", audience="device", exclude=None, exclude_worker="w-9") is True
+
+
+async def test_alert_worker_speaks_the_primary_verdict_to_only_that_worker(hub):
+    ws_subject, ws_peer, ws_dash = FakeSocket(), FakeSocket(), FakeSocket()
+    await hub.connect(ws_subject, kind="device", zone="zone-a", worker_id="w-9")
+    await hub.connect(ws_peer, kind="device", zone="zone-a", worker_id="w-1")
+    await hub.connect(ws_dash, kind="dashboard")
+
+    assert await hub.alert_worker(make_alert()) is True
+    assert await until(lambda: len(ws_subject.sent) == 1)
+
+    frame = ws_subject.sent[0]
+    assert frame["topic"] == "alert"
+    assert frame["data"]["alert_id"] == "al-1"
+    # Second person, imperative, and no ids or zone names read back at them.
+    assert frame["data"]["speech"].startswith("Stop work.")
+    assert "w-9" not in frame["data"]["speech"]
+
+    # A personal alert is not zone gossip and is not dashboard traffic.
+    assert ws_peer.sent == []
+    assert ws_dash.sent == []
+
+
+async def test_alert_worker_reaches_the_subject_even_if_their_device_zone_is_stale(hub):
+    """A stale zone check-in must never cost a worker a critical alert about themselves."""
+
+    ws = FakeSocket()
+    await hub.connect(ws, kind="device", zone="zone-somewhere-else", worker_id="w-9")
+
+    assert await hub.alert_worker(make_alert(zone="zone-a")) is True
+    assert await until(lambda: len(ws.sent) == 1)
+    assert ws.sent[0]["data"]["zone"] == "zone-a"  # the real zone still travels for display
+
+
+async def test_alert_worker_reports_when_an_alert_names_nobody(hub):
+    ws = FakeSocket()
+    await hub.connect(ws, kind="device", zone="zone-a", worker_id="w-9")
+
+    assert await hub.alert_worker(make_alert(worker_id=None)) is False
+    await asyncio.sleep(0.05)
+    assert ws.sent == []
+
+
+async def test_advisory_carries_peer_speech_and_can_skip_the_subject(hub):
+    ws_subject, ws_peer = FakeSocket(), FakeSocket()
+    await hub.connect(ws_subject, kind="device", zone="zone-a", worker_id="w-9")
+    await hub.connect(ws_peer, kind="device", zone="zone-a", worker_id="w-1")
+
+    await hub.advise_zone(make_alert(), exclude_worker="w-9")
+
+    assert await until(lambda: len(ws_peer.sent) == 1)
+    assert ws_subject.sent == []  # they already got the primary alert
+
+    data = ws_peer.sent[0]["data"]
+    assert data["severity"] == ADVISORY_SEVERITY
+    # Delivery priority is downgraded; the spoken urgency still reflects the real hazard, and a
+    # colleague's id is never read aloud.
+    assert data["speech"] == "Warning. A possible fall was detected for a worker in your zone."
+
+
+async def test_a_zone_peer_who_is_not_the_subject_still_hears_the_advisory(hub):
+    ws_peer = FakeSocket()
+    await hub.connect(ws_peer, kind="device", zone="zone-a", worker_id="w-1")
+
+    await hub.advise_zone(make_alert(), exclude_worker="w-9")
+    assert await until(lambda: len(ws_peer.sent) == 1)
+
+
 async def test_hub_start_is_idempotent(hub):
     ws = FakeSocket()
     await hub.connect(ws, kind="device", zone="zone-a")

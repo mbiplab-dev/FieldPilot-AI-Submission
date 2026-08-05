@@ -8,9 +8,12 @@ is produced by the downstream engine chain.
 from __future__ import annotations
 
 import asyncio
+import time
+from collections.abc import Callable
 
 from fieldpilot.backend.service import Orchestrator
 from fieldpilot.backend.store import SQLitePlatformStore
+from fieldpilot.broadcast.hub import BroadcastHub
 from fieldpilot.events.bus import InMemoryEventBus, publish_event
 from fieldpilot.events.schema import Event, EventType, Severity
 from fieldpilot.events.store import SQLiteEventRepository
@@ -18,6 +21,31 @@ from fieldpilot.notifications.service import NotificationService
 from fieldpilot.rules.engine import RuleEngine, default_rules
 from fieldpilot.triggers.cache import InMemoryTriggerCache
 from fieldpilot.triggers.engine import TriggerEngine
+
+
+class FakeSocket:
+    """Records the frames a connected client would have received."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def send_json(self, frame: dict) -> None:
+        self.sent.append(frame)
+
+    @property
+    def topics(self) -> list[str]:
+        return [f["topic"] for f in self.sent]
+
+
+async def until(predicate: Callable[[], bool], *, timeout: float = 2.0) -> bool:
+    """Poll until `predicate` holds — the bus and hub dispatch on background tasks."""
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.005)
+    return predicate()
 
 
 async def _stack(tmp_path):
@@ -132,6 +160,67 @@ async def test_duplicate_storm_produces_single_alert(tmp_path):
         alerts = await store.list_alerts(event_type="ppe")
         assert len(alerts) == 1
         assert alerts[0]["hit_count"] == 50
+    finally:
+        await bus.stop()
+        await events.stop()
+        await store.stop()
+
+
+async def test_one_hazard_is_spoken_to_three_audiences_in_three_voices(tmp_path):
+    """The full spoken-alert path: subject, peer, and supervisor each hear their own phrasing.
+
+    This is the product's headline promise end to end — a detector publishes one event and the
+    person at risk, the colleague beside them, and the manager in the office all get speech written
+    for their position, over the real bus and the real hub.
+    """
+
+    bus = InMemoryEventBus()
+    cache = InMemoryTriggerCache()
+    events = SQLiteEventRepository(str(tmp_path / "events.db"))
+    store = SQLitePlatformStore(str(tmp_path / "platform.db"))
+    triggers = TriggerEngine(cache, bus, dedup_window_s=45, resolve_after_s=90,
+                             alert_sink=lambda a: store.upsert_alert(a))
+    notifications = NotificationService(store, cache, bus, dedup_window_s=300)
+    hub = BroadcastHub(bus)
+    orch = Orchestrator(bus=bus, events=events, store=store, triggers=triggers,
+                        rules=RuleEngine(default_rules()), notifications=notifications, hub=hub)
+    await bus.start()
+    await events.start()
+    await store.start()
+    await orch.start()
+    await hub.start()
+
+    subject, peer, dash = FakeSocket(), FakeSocket(), FakeSocket()
+    await hub.connect(subject, kind="device", zone="zone-a", worker_id="w-1")
+    await hub.connect(peer, kind="device", zone="zone-a", worker_id="w-2")
+    await hub.connect(dash, kind="dashboard")
+
+    try:
+        await publish_event(bus, Event(
+            worker_id="w-1", camera_id="cam-1", zone="zone-a",
+            event_type=EventType.PPE, severity=Severity.HIGH, confidence=0.94,
+            payload={"ppe_item": "helmet", "dedup_key": "helmet", "message": "no helmet"},
+        ))
+
+        assert await until(lambda: subject.sent and peer.sent and dash.sent, timeout=3.0)
+
+        # The worker at risk: primary alert, second person, imperative, no ids read back.
+        assert subject.topics == ["alert"]
+        said = subject.sent[0]["data"]["speech"]
+        assert said == "Stop work. Put on your hard hat."
+
+        # The colleague: downgraded advisory, no peer's id spoken, urgency still real.
+        assert peer.topics == ["advisory"]
+        peer_said = peer.sent[0]["data"]["speech"]
+        assert "in your zone" in peer_said and "w-1" not in peer_said
+
+        # The supervisor: fully qualified, because they triage across workers and zones.
+        assert dash.topics == ["alert"]
+        dash_said = dash.sent[0]["data"]["speech"]
+        assert "worker w-1" in dash_said.lower() and "zone-a" in dash_said
+
+        # Three different sentences describing one hazard.
+        assert len({said, peer_said, dash_said}) == 3
     finally:
         await bus.stop()
         await events.stop()

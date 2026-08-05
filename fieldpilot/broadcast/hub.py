@@ -8,6 +8,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from fieldpilot.alerts.speech import spoken_phrase
 from fieldpilot.events.bus import EventBus
 from fieldpilot.logging_.logger import get_logger
 
@@ -42,10 +43,30 @@ class Client:
 
         return self.kind == "dashboard" and self.zone in (None, "", ALL_ZONES)
 
-    def wants(self, *, zone: str | None, audience: str, exclude: str | None) -> bool:
+    def wants(
+        self,
+        *,
+        zone: str | None,
+        audience: str,
+        exclude: str | None,
+        worker_id: str | None = None,
+        exclude_worker: str | None = None,
+    ) -> bool:
+        """Whether this client should receive a message with the given routing.
+
+        `worker_id` addresses one named worker — used for the primary alert about *them*, which
+        must never fan out to colleagues. A client that has not identified its worker therefore
+        matches nothing addressed this way. `exclude_worker` is the inverse: it keeps the subject
+        of an alert from also receiving the peer advisory about themselves.
+        """
+
         if self.client_id == exclude:
             return False
         if audience != "all" and audience != self.kind:
+            return False
+        if worker_id is not None and self.worker_id != worker_id:
+            return False
+        if exclude_worker is not None and self.worker_id == exclude_worker:
             return False
         if zone is None:
             return True
@@ -120,6 +141,8 @@ class BroadcastHub:
         zone: str | None = None,
         audience: str = "all",
         exclude: str | None = None,
+        worker_id: str | None = None,
+        exclude_worker: str | None = None,
     ) -> None:
         """Publish to every replica via the bus. Local delivery happens on receipt."""
 
@@ -128,14 +151,51 @@ class BroadcastHub:
             "zone": zone,
             "audience": audience,
             "exclude": exclude,
+            "worker_id": worker_id,
+            "exclude_worker": exclude_worker,
             "ts": time.time(),
             "data": data,
         })
 
+    async def alert_worker(self, alert: dict[str, Any]) -> bool:
+        """Send the primary alert to the device of the worker it is about, with speech attached.
+
+        This is the graph's "TTS Audio Alert → Phone" edge and the product's headline promise: the
+        person at risk hears the verdict, in the second person, on their own device. Dashboards get
+        the same alert through the ordinary `alert` publish; peers get only the downgraded advisory.
+
+        Deliberately published with `zone=None`: the message is addressed to one worker by id, so
+        there is nothing to leak by not scoping it, and pinning it to the alert's zone would let a
+        device whose zone check-in is stale miss a critical alert about itself. The alert's own
+        `zone` field still travels inside `data` for display.
+
+        Returns False when the alert names no worker, so the caller can log the gap.
+        """
+
+        worker = alert.get("worker_id")
+        if not worker:
+            return False
+        await self.publish(
+            "alert",
+            {**alert, "speech": spoken_phrase(alert, audience="worker")},
+            zone=None,
+            audience="device",
+            worker_id=str(worker),
+        )
+        return True
+
     async def advise_zone(
-        self, alert: dict[str, Any], *, exclude_client: str | None = None
+        self,
+        alert: dict[str, Any],
+        *,
+        exclude_client: str | None = None,
+        exclude_worker: str | None = None,
     ) -> None:
-        """Send the PRD's secondary, lower-priority advisory to the alert's zone."""
+        """Send the PRD's secondary, lower-priority advisory to the alert's zone.
+
+        `exclude_worker` keeps the subject of the alert from hearing an advisory *about themselves*
+        on top of the primary alert `alert_worker` already sent them.
+        """
 
         zone = alert.get("zone")
         if not zone:
@@ -153,10 +213,17 @@ class BroadcastHub:
                 "severity": ADVISORY_SEVERITY,
                 "original_severity": alert.get("severity"),
                 "message": _advisory_text(alert),
+                # Spoken from the *original* severity, not the downgraded advisory one. §4.4
+                # downgrades an advisory's delivery priority to stop alert storms; it is not a
+                # claim that the hazard got smaller. Telling a worker "Note: fire in your zone"
+                # would fail in the dangerous direction, the same reasoning that stops the LLM
+                # gate from suppressing high-severity alerts.
+                "speech": spoken_phrase(alert, audience="peer"),
             },
             zone=zone,
             audience="device",
             exclude=exclude_client,
+            exclude_worker=exclude_worker,
         )
 
     # -- delivery --------------------------------------------------------------
@@ -167,6 +234,8 @@ class BroadcastHub:
             zone=message.get("zone"),
             audience=str(message.get("audience") or "all"),
             exclude=message.get("exclude"),
+            worker_id=message.get("worker_id"),
+            exclude_worker=message.get("exclude_worker"),
             data=message.get("data") or {},
             ts=float(message.get("ts") or time.time()),
         )
@@ -174,11 +243,15 @@ class BroadcastHub:
     async def _deliver(
         self, *, topic: str, zone: str | None, audience: str,
         exclude: str | None, data: dict[str, Any], ts: float,
+        worker_id: str | None = None, exclude_worker: str | None = None,
     ) -> None:
         frame = {"topic": topic, "zone": zone, "ts": ts, "data": data}
         targets = [
             c for c in list(self._clients.values())
-            if c.wants(zone=zone, audience=audience, exclude=exclude)
+            if c.wants(
+                zone=zone, audience=audience, exclude=exclude,
+                worker_id=worker_id, exclude_worker=exclude_worker,
+            )
         ]
         if not targets:
             return
