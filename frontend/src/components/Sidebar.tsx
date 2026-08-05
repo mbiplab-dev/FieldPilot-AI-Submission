@@ -4,8 +4,10 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
 import { ThemeToggle } from "./ThemeToggle";
+import { VoiceToggle } from "./VoiceToggle";
 import { api } from "@/lib/api";
 import { clearSession } from "@/lib/session";
+import { resetAnnouncements, stopSpeaking } from "@/lib/speech";
 import { useSession } from "@/lib/useSession";
 
 const NAV = [
@@ -34,6 +36,11 @@ export function Sidebar({ alertCount = 0 }: { alertCount?: number }) {
     } catch {
       // the server session may already be gone — signing out locally still must succeed
     } finally {
+      // Cut off any sentence mid-flight, and forget what was already announced — otherwise the
+      // next person to sign in on this browser inherits the dedup memory and never hears an
+      // alert that was spoken to their predecessor.
+      stopSpeaking();
+      resetAnnouncements();
       clearSession();
       router.replace("/login");
       setSigningOut(false);
@@ -89,6 +96,11 @@ export function Sidebar({ alertCount = 0 }: { alertCount?: number }) {
           );
         })}
       </nav>
+
+      <div className="flex items-center justify-between border-t border-line-soft px-4 py-2.5">
+        <span className="text-[11px] text-txt-3">Spoken alerts</span>
+        <VoiceToggle />
+      </div>
 
       <div className="flex items-center justify-between border-t border-line-soft px-4 py-2.5">
         <span className="text-[11px] text-txt-3">Theme</span>

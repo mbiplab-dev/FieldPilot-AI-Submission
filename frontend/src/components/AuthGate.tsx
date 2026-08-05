@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { Sidebar } from "./Sidebar";
+import { VoiceAnnouncer } from "./VoiceAnnouncer";
 import { useSession } from "@/lib/useSession";
 
 /**
@@ -40,6 +41,8 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-screen">
+      {/* Mounted above the pages so a hazard is spoken whichever page the manager is on. */}
+      <VoiceAnnouncer />
       <Sidebar />
       <main className="flex-1 overflow-x-hidden">{children}</main>
     </div>
