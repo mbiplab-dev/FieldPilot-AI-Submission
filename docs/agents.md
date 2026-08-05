@@ -70,7 +70,7 @@ by calling the next stage directly. This document is the map, and it names the h
 | **A5** | Voice / NLP | `workforce/questions.py` (text + image) — **voice intake not built** | The worker's "ask a question about this" flow is A5's natural-language half. Speech-to-text from the glasses microphone is deferred with the hardware; see *Deferred* below. |
 | **A6** | RFI Drafter | `reasoning/rfi.py` | Deviation → zone-filtered clause retrieval → LLM draft → filed `pending_review`. Citations come from chunk metadata, never from LLM output. |
 | **A7** | Knowledge Retrieval | `reasoning/rag.py`, `reasoning/ingest.py`, `reasoning/embeddings.py` | Qdrant with `Filter(must=[FieldCondition…])` on project/zone/category. Serves both A6 and A5. |
-| **A8** | Notification | `notifications/service.py`, `broadcast/hub.py`, `alerts/dispatcher.py` | Dedup + retry + channels; WebSocket push; earcons/TTS/haptics. The "TTS Audio Alert" edge of the graph is `alerts/tts.py` + `alerts/haptics.py`. |
+| **A8** | Notification | `notifications/service.py`, `broadcast/hub.py`, `alerts/speech.py` | Dedup + retry + channels; zone- and worker-addressed WebSocket push. The "TTS Audio Alert" edge is **client-side**: `alerts/speech.py` writes the sentence per audience, the hub delivers it, and the worker's phone (`worker_app`, flutter_tts) and the dashboard (Web Speech API) synthesise locally. `alerts/tts.py` + `alerts/haptics.py` remain the *server-side* path, used by the edge pipeline. |
 | **A9** | Project Memory | `events/store.py`, `backend/store.py`, `storage/docstore.py` | The durable record every other agent reads and writes: events, alerts, RFIs, inspections, zones, feedback, occupancy, questions. Queryable over REST. |
 | **A10** | Learning / Predictive | `learning/dataset.py`, `learning/service.py`, `feedback/service.py` | Supervisor feedback → dataset → fine-tune → mAP50 delta on a locked val set → promote only if it did not regress. Predictive risk scoring is `workforce/occupancy.py`'s per-zone risk ranking. |
 
@@ -81,16 +81,17 @@ by calling the next stage directly. This document is the map, and it names the h
 | Glasses ↔ Phone (Bluetooth) | **Deferred** — no hardware. |
 | Phone → Cloud (WebRTC/RTMP) | **Deferred.** The browser-camera path (`display/server.py` `/ws/video`) stands in for the phone edge node: the operator's browser captures frames and ships JPEG over a WebSocket to the same pipeline. |
 | Cloud Ingestion Layer | `backend/app.py` `POST /events` + the event bus (`events/bus.py`, memory or Redis). Any producer — edge pipeline, browser, mobile, a worker's manual report — enters here. |
-| A8 → TTS Audio Alert → Phone | `alerts/tts.py` (espeak local, ElevenLabs/Google cloud) and `alerts/haptics.py`. Code paths exist; no keys and no paired device are wired, so local speech plus a logged "simulated buzz" is what actually runs. |
+| A8 → TTS Audio Alert → Phone | **Built, client-side.** The spoken sentence travels on the broadcast frame as `data.speech` (`alerts/speech.py`) and the phone speaks it via flutter_tts; the dashboard speaks its own phrasing via the Web Speech API. This is deliberate: `alerts/tts.py` renders onto the *server's* speakers, which is the wrong machine — and on a host without espeak-ng it cannot speak at all. On-device synthesis also needs no API key and survives a dead zone. What is still missing is routing that audio out through the *glasses'* open-ear speaker, which needs the hardware. |
 | Multi-Agent System boundary | Not a process boundary. All agents run in the backend service; the bus is the seam. |
 
 ## Human roles
 
 The graph shows machine flow. Two human roles consume it:
 
-- **Worker** — sees only their own alerts, checks in and out of a zone, asks A5/A7 a question with a
-  photo, and can raise an alert manually (which enters the Cloud Ingestion Layer as a normal event,
-  so it flows through A8 like any machine detection).
+- **Worker** — *hears* their own hazards spoken aloud in the second person, sees only their own
+  alerts plus zone advisories, checks in and out of a zone, asks A5/A7 a question with a photo, and
+  can raise an alert manually (which enters the Cloud Ingestion Layer as a normal event, so it flows
+  through A8 — and is spoken — exactly like a machine detection).
 - **Site manager** — the supervisory view: the alert board, zone occupancy and risk ranking, the RFI
   review queue, the questions inbox, rules, and the live feeds.
 

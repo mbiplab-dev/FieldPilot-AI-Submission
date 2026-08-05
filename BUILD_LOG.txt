@@ -744,6 +744,125 @@ checks through localhost:3000/api/* exactly as the browser's fetch() would:
 Final state: backend 455 tests / ruff clean, frontend lint+tsc+build clean (13 routes),
 Flutter analyze+test clean (both platform builds succeed). Commit 9a63515.
 
+
+--------------------------------------------------------------------------------
+SESSION 2026-08-05 (evening) — SPOKEN ALERTS ON BOTH CLIENTS + FULL-STACK AUDIT
+--------------------------------------------------------------------------------
+Ask: "make a full run and check everything is implemented properly and working,
+the tts is implemented in the web app and also in mobile app etc, everything
+should be there and make it upto the pptx in this repo."
+
+THE CENTRAL FINDING
+The product's headline promise -- the worker HEARS the verdict -- was 100%
+non-functional in every path. alerts/tts.py renders onto the SERVER's speakers,
+which is the wrong machine (the people who need to hear an alert hold a phone or
+watch a browser). And on this host it cannot speak at all: espeak-ng is not
+installed and pyttsx3 requires it, so every alert fell through to an
+"all TTS backends failed" log line. Neither the web app nor the Flutter app had
+any TTS whatsoever, and the Flutter app had no real-time path at all (poll only).
+
+WHAT WAS BUILT
+1. fieldpilot/alerts/speech.py -- the spoken phrase is now DATA, not a side
+   effect. One hazard, three phrasings, because the same fact is a different
+   sentence depending on who hears it:
+     worker     "Stop work. Put on your hard hat."          (2nd person, no ids)
+     peer       "Heads up. A worker is missing a hard hat in your zone."
+     dashboard  "High alert. Worker w-9 is missing a hard hat in zone A12."
+   Pure and TOTAL: a malformed alert degrades the sentence, never raises --
+   losing an alert because we could not phrase it is the worst failure mode.
+   Units expanded ("40mm" -> "40 millimetres") so a synthesiser does not spell
+   out "em em".
+
+2. broadcast/hub.py -- worker-ADDRESSED delivery. Before this, the primary alert
+   was published audience="dashboard" only, so the worker at risk had NO path to
+   their own alert; they got a third-person advisory about themselves. Now
+   alert_worker() targets them by worker_id and advise_zone(exclude_worker=...)
+   keeps them from being told twice. Worker-addressed messages deliberately
+   ignore zone scoping: a stale zone check-in must never cost somebody a
+   critical alert about themselves.
+
+3. Web dashboard (Web Speech API): lib/speech.ts + useVoice.ts + VoiceToggle +
+   VoiceAnnouncer (mounted in AuthGate, above the pages -- an alert that only
+   spoke on /alerts would be an alert nobody heard).
+
+4. Flutter app: core/voice.dart (flutter_tts) + core/live_feed.dart (the app's
+   first real-time path: WebSocket as kind=device with worker_id + zone,
+   exponential backoff with jitter). Speech wiring lives above HomeShell so a
+   hazard is spoken with the phone in the worker's pocket -- the actual intended
+   posture.
+
+5. docs/pitch-vs-code.md -- every deck claim audited against the code:
+   built / built-differently / not-built. Written so nobody has to guess in
+   front of a judge.
+
+BUGS FOUND AND FIXED (all found by verification, not by reading)
+* THE IMPORTANT ONE: the spoken alert was serialised behind LLM RFI drafting.
+  handle_event ran the rules engine before the broadcast, and generate_rfi
+  awaits an LLM draft inside that loop. Invisible at ~10ms with a warm model;
+  SECONDS when the model is cold. Found because the first e2e run delivered
+  nothing inside a 6s window and the second was instant -- the difference was a
+  cold Ollama. Broadcast now runs immediately after the LLM gate, ahead of rules
+  and notifications. Safe: rule actions never mutate the alert (confirmed on the
+  live bus -- broadcast.alert carried severity=high while the
+  no-helmet-in-danger-zone rule's own notification read CRITICAL). The
+  regression test was verified to actually FAIL under the old ordering.
+* AndroidManifest needed a TTS_SERVICE <queries> entry. Without it Android 11+
+  package-visibility hides the system speech engine and flutter_tts fails
+  SILENTLY -- no exception, just no speech. Load-bearing, not boilerplate.
+* Advisories are pushed, never stored against a worker, so /me/alerts can never
+  contain them: the worker would HEAR "a worker is missing a hard hat in your
+  zone" and find nothing on screen. Alerts tab now shows them under "Heard in
+  your zone" with the exact sentence spoken.
+* "a safety goggles" -- article applied to a plural PPE noun.
+* Fallback sentence stranded the location clause ("Something odd. In your
+  zone.") because the detector message already ended in a period.
+* IconButton has no onLongPress (would not have compiled) -- used InkWell.
+* Sign-out on both clients now clears the announcement dedup memory, otherwise
+  the next person to use that browser/phone is silently denied an alert already
+  spoken to their predecessor.
+
+VERIFIED (not assumed)
+* 504 backend tests, ruff clean. 39 new speech tests, 8 new hub-routing tests,
+  2 new integration tests (three-audience delivery; speech-not-blocked-by-RFI).
+* Frontend lint + tsc + production build clean. speech.ts was compiled
+  standalone and exercised against a STUBBED Web Speech API -- 26 checks
+  covering opt-in default, gesture priming, dedup, urgent interrupt, backlog
+  drop, reset-on-sign-out. Confirmed the voice code ships in the production
+  bundle (not tree-shaken).
+* flutter analyze clean; 22 tests (9 frame-parsing + 11 voice policy against a
+  mocked flutter_tts MethodChannel); debug APK builds.
+* END TO END on postgres+redis+qdrant+ollama: one hazard event, four live
+  sockets -> the subject heard "Stop work. Rebar spacing is 40 millimetres
+  above spec.", a zone peer heard the peer-framed advisory with no colleague id,
+  the manager heard the fully-qualified sentence, and a worker in another zone
+  heard NOTHING. Also confirmed a hand-reported hazard speaks identically to a
+  machine detection ("Stop work. Fire detected. Evacuate now.").
+* Full REST smoke through the Next.js proxy: auth (incl. 401/403 gating), zones,
+  occupancy, photo questions -> LLM -> manager reply -> worker sees it, manual
+  alerts, all 11 manager routes 200, /learning + /blueprints correctly 404.
+* Detection -> spoken alert on the worker's phone measured at 22-50 ms.
+
+GOTCHAS ADDED
+* Do NOT put anything slow (LLM, network) ahead of the hub broadcast in
+  handle_event. Warning a human is the time-critical output; paperwork is not.
+* /me/zone returns NESTED {"occupancy": {...}} (the Flutter client reads
+  json['occupancy']). POST /me/alerts takes multipart FORM fields, not JSON --
+  a JSON body 422s. There is no GET /stats; it is /alerts/stats, /events/stats,
+  /questions/stats, /feedback/stats, /health.
+* pkill -f "fieldpilot.run --backend" also matches the shell running it and will
+  kill your own command. Kill by port or PID.
+* flutter_tts 4.2.5 still applies the Kotlin Gradle Plugin; Flutter warns this
+  will break in a future release. Plugin-side, builds fine today.
+
+STILL NOT BUILT (unchanged, and deliberately not stubbed)
+Glasses/Bluetooth/open-ear audio routing, Whisper voice intake, Depth Anything
+V2 (measurement is reference-object px/mm calibration), BLE beacons (replaced by
+explicit zone check-in), Neo4j (project memory is the relational docstore),
+NeRF/Gaussian Splatting, WhatsApp (routed but no sender -> status "skipped"),
+Procore/BIM 360, the second "Executive" dashboard + ROI calculator + 3D site
+map. The deck's impact figures (23 RFIs, $1.3M, 340h, 94.3%) are PROJECTIONS --
+nothing in this repo measures them. See docs/pitch-vs-code.md.
+
 ================================================================================
 END OF LOG — append new sessions to §5, newest at the bottom.
 ================================================================================
