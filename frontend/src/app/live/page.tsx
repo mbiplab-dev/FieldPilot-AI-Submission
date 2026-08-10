@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { PageHeader } from "@/components/PageHeader";
 import { InspectionToggle } from "@/components/InspectionToggle";
+import { WorkerFeeds } from "@/components/WorkerFeeds";
 import {
   Badge,
   Button,
@@ -58,6 +59,11 @@ export default function LivePage() {
         }
       />
 
+      {/* The workers' phones are the primary capture source — the server camera below is the
+          fallback for a fixed vantage point. */}
+      <WorkerFeeds />
+
+      <SectionTitle>Server camera</SectionTitle>
       <div className="grid gap-4 lg:grid-cols-[2fr_1fr]">
         <div>
           <div className="relative aspect-video overflow-hidden rounded-xl border border-line bg-black">

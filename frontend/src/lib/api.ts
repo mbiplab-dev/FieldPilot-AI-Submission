@@ -72,6 +72,25 @@ function jsonInit(method: string, body?: unknown): RequestInit {
   };
 }
 
+/**
+ * The edge server (vision pipeline) sits behind a different rewrite from the backend REST API —
+ * see `next.config.ts`. Worker camera feeds are served there because that is the process holding
+ * the frames, so they cannot go through {@link req}'s `/api` base.
+ */
+const EDGE_BASE = "/feed";
+
+async function edgeGet<T>(path: string): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(`${EDGE_BASE}${path}`, { cache: "no-store" });
+  } catch {
+    throw new ApiError(0, "Edge server unreachable — is the vision service running on :8000?");
+  }
+  const text = await res.text();
+  if (!res.ok) throw new ApiError(res.status, `${res.status} ${res.statusText || "request failed"}`);
+  return (text ? parseJson(text) : null) as T;
+}
+
 const get = <T,>(path: string) => req<T>(path);
 const post = <T,>(path: string, body?: unknown) => req<T>(path, jsonInit("POST", body));
 const put = <T,>(path: string, body?: unknown) => req<T>(path, jsonInit("PUT", body));
@@ -606,7 +625,39 @@ export const api = {
   inspectionMode: () => get<{ enabled: boolean }>("/control/inspection"),
   setInspectionMode: (enabled: boolean) =>
     post<{ enabled: boolean }>("/control/inspection", { enabled }),
+
+  /* worker phone cameras — served by the edge, not the backend, so this bypasses `/api` */
+  workerFeeds: () => edgeGet<{ feeds: WorkerCameraFeed[]; stats: WorkerFeedStats }>("/workers/live"),
 };
+
+/** One worker's phone camera, as reported by the edge server. */
+export interface WorkerCameraFeed {
+  worker_id: string;
+  zone: string | null;
+  display_name: string | null;
+  started_at: number;
+  last_frame_at: number | null;
+  /** Seconds since the last frame, or null if none has arrived. */
+  age_s: number | null;
+  /** False once the phone stops sending — backgrounded, out of signal, or battery saver. */
+  live: boolean;
+  frames: number;
+  hazards: number;
+  fps: number;
+  width: number;
+  height: number;
+}
+
+export interface WorkerFeedStats {
+  streaming: number;
+  known: number;
+  workers: string[];
+}
+
+/** MJPEG URL for one worker's phone camera, annotated with what the server detected. */
+export function workerStreamUrl(workerId: string): string {
+  return `${EDGE_BASE}/workers/${encodeURIComponent(workerId)}/stream`;
+}
 
 /* ------------------------------ helpers ------------------------------ */
 
