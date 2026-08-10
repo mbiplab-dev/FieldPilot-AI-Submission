@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import { PageHeader } from "@/components/PageHeader";
 import { InspectionToggle } from "@/components/InspectionToggle";
 import { WorkerFeeds } from "@/components/WorkerFeeds";
@@ -9,12 +8,9 @@ import {
   Button,
   Card,
   Empty,
-  Field,
   LiveChip,
-  Note,
   SectionTitle,
   SeverityChip,
-  inputClass,
   type Tone,
 } from "@/components/ui";
 import { api, fmtTime, timeAgo, type Alert } from "@/lib/api";
@@ -28,29 +24,34 @@ const TOPIC_TONE: Record<string, Tone> = {
   advisory: "purple",
   rfi: "accent",
   inspection: "warn",
-  learning: "accent",
+  question: "info",
+  message: "purple",
   zone: "neutral",
 };
 
+/**
+ * The site manager's wall: every worker's camera on the left, everything happening on the right.
+ *
+ * The server's own camera is deliberately absent. The workers' phones are the capture source now,
+ * and a fixed webcam pointed at whatever the laptop faces is not site footage — showing it beside
+ * real worker feeds implied a coverage that did not exist.
+ */
 export default function LivePage() {
-  const [feedUp, setFeedUp] = useState(true);
-  const [zoneInput, setZoneInput] = useState("");
-  const [zone, setZone] = useState("");
+  const live = useLiveFeed({ bufferSize: 120 });
 
-  const live = useLiveFeed({ zone: zone || undefined, bufferSize: 80 });
   const { data, error } = usePoll(
     () => api.alerts({ limit: "200" }),
     live.connected ? 20000 : 4000,
     [live.connected],
   );
 
-  const act = (data?.alerts ?? []).filter((a) => a.state === "NEW" || a.state === "ACTIVE");
+  const active = (data?.alerts ?? []).filter((a) => a.state === "NEW" || a.state === "ACTIVE");
 
   return (
     <div className="p-6">
       <PageHeader
-        title="Live feed"
-        subtitle="Annotated edge stream · enable inspection mode to scan for structural defects"
+        title="Live site"
+        subtitle="Every worker's camera, analysed on the server · alerts and AI verdicts as they happen"
         action={
           <div className="flex items-center gap-2.5">
             <LiveChip connected={live.connected} />
@@ -59,87 +60,46 @@ export default function LivePage() {
         }
       />
 
-      {/* The workers' phones are the primary capture source — the server camera below is the
-          fallback for a fixed vantage point. */}
-      <WorkerFeeds />
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]">
+        {/* ---------------------------------------------------------- cameras */}
+        <div className="min-w-0">
+          <WorkerFeeds />
+        </div>
 
-      <SectionTitle>Server camera</SectionTitle>
-      <div className="grid gap-4 lg:grid-cols-[2fr_1fr]">
-        <div>
-          <div className="relative aspect-video overflow-hidden rounded-xl border border-line bg-black">
-            {feedUp ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src="/feed/stream"
-                alt="live edge feed"
-                className="h-full w-full object-contain"
-                onError={() => setFeedUp(false)}
-              />
-            ) : (
-              <div className="grid h-full place-items-center text-sm text-zinc-400">
-                <div className="text-center">
-                  <div className="mb-2 text-2xl">⏻</div>
-                  <div className="font-semibold">Live feed unavailable</div>
-                  <div className="mt-1 text-xs text-zinc-500">
-                    Start the edge: <code className="font-mono">make run-all</code> or{" "}
-                    <code className="font-mono">make edge</code>
-                  </div>
-                  <div className="mt-3">
-                    <Button size="sm" tone="secondary" onClick={() => setFeedUp(true)}>
-                      Retry stream
-                    </Button>
-                  </div>
-                </div>
+        {/* ---------------------------------------------------------- activity */}
+        <div className="min-w-0">
+          <SectionTitle>Active alerts</SectionTitle>
+          <Card className="mb-5">
+            {error && !data ? (
+              <Empty>Alert list unavailable — {error}</Empty>
+            ) : active.length ? (
+              <div className="max-h-[280px] overflow-y-auto">
+                {active.map((a: Alert) => (
+                  <AlertRow key={a.alert_id} alert={a} />
+                ))}
               </div>
+            ) : (
+              <Empty>No active alerts.</Empty>
             )}
-          </div>
-
-          <Card className="mt-4 px-4 py-4">
-            <InspectionToggle variant="switch" />
           </Card>
 
-          <SectionTitle>Live event ticker</SectionTitle>
-          {!live.connected ? (
-            <Note tone="warn" title="Not receiving push events">
-              {live.error ?? "Connecting to the broadcast socket…"} The alert list on the right
-              still refreshes on a timer.
-            </Note>
-          ) : null}
+          <div className="flex items-center justify-between">
+            <SectionTitle>Live activity &amp; AI verdicts</SectionTitle>
+            <Button
+              size="sm"
+              tone="secondary"
+              onClick={live.clear}
+              disabled={!live.frames.length}
+            >
+              Clear
+            </Button>
+          </div>
           <Card>
-            <div className="flex flex-wrap items-end gap-3 border-b border-line-soft px-4 py-3">
-              <Field label="Zone filter" htmlFor="live-zone" className="w-56">
-                <input
-                  id="live-zone"
-                  value={zoneInput}
-                  onChange={(e) => setZoneInput(e.target.value)}
-                  placeholder="all zones"
-                  className={inputClass}
-                />
-              </Field>
-              <Button size="sm" tone="secondary" onClick={() => setZone(zoneInput.trim())}>
-                Apply
-              </Button>
-              {zone ? (
-                <Button
-                  size="sm"
-                  tone="secondary"
-                  onClick={() => {
-                    setZone("");
-                    setZoneInput("");
-                  }}
-                >
-                  Clear
-                </Button>
-              ) : null}
-              <div className="ml-auto flex items-center gap-2 pb-1.5">
-                <span className="text-[11px] text-txt-3">{live.frames.length} event(s)</span>
-                <Button size="sm" tone="secondary" onClick={live.clear} disabled={!live.frames.length}>
-                  Clear
-                </Button>
-              </div>
-            </div>
-
-            <ul aria-live="polite" aria-label="Live site events" className="max-h-[420px] overflow-y-auto">
+            <ul
+              aria-live="polite"
+              aria-label="Live site events"
+              className="max-h-[560px] overflow-y-auto"
+            >
               {live.frames.length ? (
                 live.frames.map((frame) => <TickerRow key={frame.seq} frame={frame} />)
               ) : (
@@ -154,53 +114,74 @@ export default function LivePage() {
             </ul>
           </Card>
         </div>
-
-        <div>
-          <SectionTitle>Active right now</SectionTitle>
-          <Card>
-            {error && !data ? (
-              <Empty>Alert list unavailable — {error}</Empty>
-            ) : act.length ? (
-              act.map((a: Alert) => (
-                <div
-                  key={a.alert_id}
-                  className="flex items-center gap-2.5 border-b border-line-soft px-4 py-2.5 text-sm last:border-0"
-                >
-                  <SeverityChip severity={a.severity} />
-                  <span className="flex-1 truncate">{a.message || a.event_type}</span>
-                  <span className="shrink-0 text-[11px] text-txt-3">{timeAgo(a.last_seen)}</span>
-                </div>
-              ))
-            ) : (
-              <Empty>No active alerts.</Empty>
-            )}
-          </Card>
-        </div>
       </div>
     </div>
   );
 }
 
+function AlertRow({ alert }: { alert: Alert }) {
+  return (
+    <div className="flex items-center gap-2.5 border-b border-line-soft px-4 py-2.5 text-sm last:border-0">
+      <SeverityChip severity={alert.severity} />
+      <span className="flex-1 truncate">{alert.message || alert.event_type}</span>
+      <span className="shrink-0 text-[11px] text-txt-3">{timeAgo(alert.last_seen)}</span>
+    </div>
+  );
+}
+
 /**
- * Advisories are zone-scoped, cross-worker warnings ("three workers unharnessed
- * on level 4") rather than single detections — they get their own treatment.
+ * One line of site activity.
+ *
+ * Advisories are zone-scoped cross-worker warnings rather than single detections, so they get their
+ * own emphasis. Alerts additionally show the LLM's verdict where there is one — that verdict is
+ * noise control, never a safety authority, so a hazard the model disputed is surfaced loudly rather
+ * than quietly dropped.
  */
 function TickerRow({ frame }: { frame: LiveFrame }) {
   const advisory = frame.topic === "advisory";
+  const data = frame.data as Record<string, unknown> | null;
+  const verdict =
+    data && typeof data === "object" ? (data.llm_verdict as Record<string, unknown> | undefined) : undefined;
+  const disputed = Boolean(data?.llm_disputed ?? verdict?.disputed);
+  const spoken = typeof data?.speech === "string" ? (data.speech as string) : null;
+  const reasoning = typeof verdict?.reasoning === "string" ? (verdict.reasoning as string) : null;
+
   return (
     <li
-      className={`flex items-center gap-2.5 border-b border-line-soft px-4 py-2.5 text-sm last:border-0 ${
+      className={`border-b border-line-soft px-4 py-2.5 text-sm last:border-0 ${
         advisory ? "border-l-2 border-l-purple-500 bg-purple-500/5" : ""
       }`}
     >
-      <span className="w-[68px] shrink-0 font-mono text-[11px] text-txt-3">{fmtTime(frame.ts)}</span>
-      <Badge tone={TOPIC_TONE[frame.topic] ?? "neutral"}>
-        {advisory ? "advisory" : frame.topic.replace("_", " ")}
-      </Badge>
-      <span className={`flex-1 truncate ${advisory ? "font-semibold" : ""}`}>
-        {frameSummary(frame)}
-      </span>
-      <span className="shrink-0 font-mono text-[11px] text-txt-3">{frame.zone ?? "–"}</span>
+      <div className="flex items-center gap-2.5">
+        <span className="w-[60px] shrink-0 font-mono text-[11px] text-txt-3">
+          {fmtTime(frame.ts)}
+        </span>
+        <Badge tone={TOPIC_TONE[frame.topic] ?? "neutral"}>
+          {advisory ? "advisory" : frame.topic.replace("_", " ")}
+        </Badge>
+        <span className={`flex-1 truncate ${advisory ? "font-semibold" : ""}`}>
+          {frameSummary(frame)}
+        </span>
+        <span className="shrink-0 font-mono text-[11px] text-txt-3">{frame.zone ?? "–"}</span>
+      </div>
+
+      {spoken ? (
+        <div className="mt-1 pl-[70px] text-[11px] text-txt-3">
+          <span className="mr-1">🔊</span>
+          {spoken}
+        </div>
+      ) : null}
+
+      {reasoning ? (
+        <div className="mt-1 flex items-start gap-1.5 pl-[70px]">
+          {disputed ? (
+            <Badge tone="bad">escalated anyway</Badge>
+          ) : (
+            <Badge tone="neutral">AI</Badge>
+          )}
+          <span className="flex-1 text-[11px] text-txt-3">{reasoning}</span>
+        </div>
+      ) : null}
     </li>
   );
 }

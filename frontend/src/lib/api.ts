@@ -628,7 +628,51 @@ export const api = {
 
   /* worker phone cameras — served by the edge, not the backend, so this bypasses `/api` */
   workerFeeds: () => edgeGet<{ feeds: WorkerCameraFeed[]; stats: WorkerFeedStats }>("/workers/live"),
+
+  /* direct messages */
+  messageThreads: () => get<{ threads: MessageThread[] }>("/messages/threads"),
+  unreadMessages: () => get<{ unread: number }>("/messages/unread"),
+  thread: (workerId: string) =>
+    get<{ worker_id: string; messages: DirectMessage[] }>(
+      `/messages/${encodeURIComponent(workerId)}`,
+    ),
+  markThreadRead: (workerId: string) =>
+    post<{ marked_read: number }>(`/messages/${encodeURIComponent(workerId)}/read`),
+  /** Text and/or a recorded voice note. Multipart because the audio is a file. */
+  sendMessage: (workerId: string, input: { text?: string; audio?: Blob }) => {
+    const form = new FormData();
+    form.append("text", input.text ?? "");
+    if (input.audio) form.append("audio", input.audio, "voice.webm");
+    return req<DirectMessage>(`/messages/${encodeURIComponent(workerId)}`, {
+      method: "POST",
+      body: form,
+    });
+  },
 };
+
+export interface DirectMessage {
+  message_id: string;
+  worker_id: string;
+  sender_role: "worker" | "site_manager";
+  sender_id: string;
+  sender_name: string;
+  text: string;
+  audio_url: string | null;
+  audio_seconds: number | null;
+  read_at: number | null;
+  created_at: number;
+}
+
+export interface MessageThread {
+  worker_id: string;
+  worker_name: string | null;
+  messages: number;
+  unread: number;
+  last_at: number;
+  last_text: string;
+  last_sender_role: "worker" | "site_manager" | null;
+  last_has_audio: boolean;
+}
 
 /** One worker's phone camera, as reported by the edge server. */
 export interface WorkerCameraFeed {

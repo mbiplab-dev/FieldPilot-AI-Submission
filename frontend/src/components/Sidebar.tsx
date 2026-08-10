@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
+import { useNavBadges } from "./NavBadges";
 import { ThemeToggle } from "./ThemeToggle";
 import { VoiceToggle } from "./VoiceToggle";
 import { api } from "@/lib/api";
@@ -13,9 +14,9 @@ import { useSession } from "@/lib/useSession";
 const NAV = [
   { href: "/", label: "Overview", icon: "M3 12 12 3l9 9M5 10v10h4v-6h6v6h4V10" },
   { href: "/live", label: "Live", icon: "M23 7 16 12l7 5V7zm-9 1a4 4 0 1 1-4 4 4 4 0 0 1 4-4zM1 5h14v14H1a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z" },
-  { href: "/camera", label: "Camera", icon: "M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" },
   { href: "/alerts", label: "Alerts", icon: "M18 8A6 6 0 0 0 6 8 5 5 0 0 0 5 22h13a5 5 0 0 0 0-14M12 9v4m0 4h.01" },
   { href: "/questions", label: "Questions", icon: "M18 10c0 3.87-3.58 7-8 7a8.7 8.7 0 0 1-2.4-.33L3 18l1.24-3.09A6.9 6.9 0 0 1 2 10c0-3.87 3.58-7 8-7s8 3.13 8 7z" },
+  { href: "/messages", label: "Messages", icon: "M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2z" },
   { href: "/rfis", label: "RFIs", icon: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zm0 0v6h6M9 15l2 2 4-4" },
   { href: "/workers", label: "Workers", icon: "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm14 10v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" },
   { href: "/zones", label: "Zones", icon: "M12 21s7-6.4 7-11a7 7 0 1 0-14 0c0 4.6 7 11 7 11zm0-8a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" },
@@ -23,11 +24,20 @@ const NAV = [
   { href: "/activity", label: "Activity", icon: "M12 6v6l4 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z" },
 ];
 
-export function Sidebar({ alertCount = 0 }: { alertCount?: number }) {
+export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const session = useSession();
+  const badges = useNavBadges();
   const [signingOut, setSigningOut] = useState(false);
+
+  /** What is waiting behind each nav entry, so the manager sees it without opening the page. */
+  const count = (href: string): number => {
+    if (href === "/alerts") return badges.alerts;
+    if (href === "/questions") return badges.questions;
+    if (href === "/messages") return badges.messages;
+    return 0;
+  };
 
   const signOut = async () => {
     setSigningOut(true);
@@ -87,9 +97,15 @@ export function Sidebar({ alertCount = 0 }: { alertCount?: number }) {
                 <path d={item.icon} />
               </svg>
               <span className="flex-1">{item.label}</span>
-              {item.href === "/alerts" && alertCount > 0 && (
-                <span className="rounded-full bg-accent/15 px-1.5 text-[10px] font-bold text-accent">
-                  {alertCount}
+              {count(item.href) > 0 && (
+                <span
+                  className={`rounded-full px-1.5 text-[10px] font-bold ${
+                    item.href === "/alerts"
+                      ? "bg-red-500/15 text-red-500"
+                      : "bg-accent/15 text-accent"
+                  }`}
+                >
+                  {count(item.href)}
                 </span>
               )}
             </Link>

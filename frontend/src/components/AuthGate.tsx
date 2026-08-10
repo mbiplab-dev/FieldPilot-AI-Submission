@@ -2,8 +2,10 @@
 
 import { useEffect } from "react";
 import { usePathname, useRouter } from "next/navigation";
+import { NavBadgeProvider } from "./NavBadges";
 import { Sidebar } from "./Sidebar";
 import { VoiceAnnouncer } from "./VoiceAnnouncer";
+import { WorkerAlarmBanner } from "./WorkerAlarmBanner";
 import { useSession } from "@/lib/useSession";
 
 /**
@@ -40,12 +42,16 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="flex min-h-screen">
-      {/* Mounted above the pages so a hazard is spoken whichever page the manager is on. */}
-      <VoiceAnnouncer />
-      <Sidebar />
-      <main className="flex-1 overflow-x-hidden">{children}</main>
-    </div>
+    <NavBadgeProvider>
+      <div className="flex min-h-screen">
+        {/* Both mounted above the pages: a hazard must be spoken, and a worker raising the alarm
+            must be seen, whichever page the manager happens to be on. */}
+        <VoiceAnnouncer />
+        <WorkerAlarmBanner />
+        <Sidebar />
+        <main className="flex-1 overflow-x-hidden">{children}</main>
+      </div>
+    </NavBadgeProvider>
   );
 }
 
