@@ -13,10 +13,18 @@ class Session extends ChangeNotifier {
   static const _tokenKey = 'fieldpilot.token';
   static const _serverKey = 'fieldpilot.server';
 
-  /// LAN address of the FieldPilot backend. A worker's phone is not the same device as the
-  /// server, so `localhost` is wrong for anyone but a desktop test build — this is deliberately
-  /// editable on the login screen rather than hard-coded.
-  static const defaultServer = 'http://10.44.51.32:8100';
+  /// Where the backend lives. Editable on the login screen, because there is no address that is
+  /// right everywhere:
+  ///
+  ///   * `http://localhost:8100` works over a USB cable after
+  ///     `adb reverse tcp:8100 tcp:8100`, which is the most reliable option during development —
+  ///     it survives the laptop's LAN address changing and needs no shared Wi-Fi.
+  ///   * `http://<laptop-lan-ip>:8100` for a phone on the same Wi-Fi.
+  ///
+  /// `localhost` is the default precisely because a hardcoded LAN IP goes stale the moment DHCP
+  /// reassigns it, which is a confusing "could not reach the server" for something that is not
+  /// actually broken.
+  static const defaultServer = 'http://localhost:8100';
 
   String serverUrl = defaultServer;
   String? _token;
@@ -50,6 +58,20 @@ class Session extends ChangeNotifier {
     }
     loading = false;
     notifyListeners();
+  }
+
+  /// Where the vision edge server listens. Camera frames go here rather than to the REST backend:
+  /// the edge is the process holding the loaded detector weights, and it already accepts JPEG
+  /// frames on `/ws/video` from the browser-camera page.
+  ///
+  /// Derived from [serverUrl] by swapping the port, because in every deployment so far the two
+  /// run on the same host. Falls back to the raw host if the URL cannot be parsed.
+  static const edgePort = 8000;
+
+  String get edgeUrl {
+    final uri = Uri.tryParse(serverUrl);
+    if (uri == null || uri.host.isEmpty) return 'http://localhost:$edgePort';
+    return uri.replace(port: edgePort, path: '').toString();
   }
 
   /// Reported by the Zone tab after every check-in/out, so the live socket can re-scope.

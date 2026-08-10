@@ -10,6 +10,15 @@ import 'models.dart';
 /// Holds the base URL and bearer token as plain fields rather than reading them from
 /// storage per-call — [ApiClient] is created fresh by [Session] whenever either changes, so
 /// there is never a stale-token call in flight.
+///
+/// Paths here are **server-relative and unprefixed** (`/auth/login`, not `/api/auth/login`).
+/// Any prefix belongs in [baseUrl], which makes both deployments work from one code path:
+///
+///   * straight at the backend — `http://<host>:8100` → `http://<host>:8100/auth/login`
+///   * through the dashboard's dev proxy — `http://<host>:3000/api`
+///
+/// This used to hardcode `/api`, which is the Next.js rewrite convention and 404s against the
+/// backend itself. A phone should not need the web dev server running to talk to the API.
 class ApiClient {
   final String baseUrl;
   final String? token;
@@ -86,7 +95,7 @@ class ApiClient {
   // -- auth --------------------------------------------------------------
 
   Future<(String token, WorkerUser user)> login(String username, String password) async {
-    final json = await _postJson('/api/auth/login', {
+    final json = await _postJson('/auth/login', {
       'username': username,
       'password': password,
     }) as Map<String, dynamic>;
@@ -95,19 +104,19 @@ class ApiClient {
 
   Future<void> logout() async {
     try {
-      await _postEmpty('/api/auth/logout');
+      await _postEmpty('/auth/logout');
     } catch (_) {
       // logging out locally must succeed even if the network call does not
     }
   }
 
   Future<WorkerUser> me() async =>
-      WorkerUser.fromJson(await _get('/api/auth/me') as Map<String, dynamic>);
+      WorkerUser.fromJson(await _get('/auth/me') as Map<String, dynamic>);
 
   // -- worker: alerts + zone ----------------------------------------------
 
   Future<List<Alert>> myAlerts({int limit = 100}) async {
-    final json = await _get('/api/me/alerts', {'limit': '$limit'}) as Map<String, dynamic>;
+    final json = await _get('/me/alerts', {'limit': '$limit'}) as Map<String, dynamic>;
     return (json['alerts'] as List).map((e) => Alert.fromJson(e as Map<String, dynamic>)).toList();
   }
 
@@ -119,7 +128,7 @@ class ApiClient {
     Uint8List? imageBytes,
   }) async {
     return await _multipart(
-      '/api/me/alerts',
+      '/me/alerts',
       fields: {
         'event_type': eventType,
         'severity': severity,
@@ -131,25 +140,25 @@ class ApiClient {
   }
 
   Future<ZoneOccupancy?> myZone() async {
-    final json = await _get('/api/me/zone') as Map<String, dynamic>;
+    final json = await _get('/me/zone') as Map<String, dynamic>;
     final occ = json['occupancy'];
     return occ == null ? null : ZoneOccupancy.fromJson(occ as Map<String, dynamic>);
   }
 
   Future<List<ZoneInfo>> zones() async {
-    final json = await _get('/api/zones') as Map<String, dynamic>;
+    final json = await _get('/zones') as Map<String, dynamic>;
     return (json['zones'] as List).map((e) => ZoneInfo.fromJson(e as Map<String, dynamic>)).toList();
   }
 
   /// Returns `(enteredAt, closedPreviousZoneId)`.
   Future<(double, String?)> enterZone(String zoneId) async {
-    final json = await _postEmpty('/api/zones/$zoneId/enter') as Map<String, dynamic>;
+    final json = await _postEmpty('/zones/$zoneId/enter') as Map<String, dynamic>;
     final closed = json['closed_previous'] as Map<String, dynamic>?;
     return ((json['entered_at'] as num?)?.toDouble() ?? 0, closed?['zone_id'] as String?);
   }
 
   Future<double?> leaveZone(String zoneId) async {
-    final json = await _postEmpty('/api/zones/$zoneId/leave') as Map<String, dynamic>;
+    final json = await _postEmpty('/zones/$zoneId/leave') as Map<String, dynamic>;
     return (json['duration_s'] as num?)?.toDouble();
   }
 
@@ -161,7 +170,7 @@ class ApiClient {
     Uint8List? imageBytes,
   }) async {
     final json = await _multipart(
-      '/api/questions',
+      '/questions',
       fields: {'text': text, 'zone': ?zone},
       imageBytes: imageBytes,
     );
@@ -169,14 +178,14 @@ class ApiClient {
   }
 
   Future<List<WorkerQuestion>> myQuestions({int limit = 100}) async {
-    final json = await _get('/api/questions', {'limit': '$limit'}) as Map<String, dynamic>;
+    final json = await _get('/questions', {'limit': '$limit'}) as Map<String, dynamic>;
     return (json['questions'] as List)
         .map((e) => WorkerQuestion.fromJson(e as Map<String, dynamic>))
         .toList();
   }
 
   Future<WorkerQuestion> question(String id) async =>
-      WorkerQuestion.fromJson(await _get('/api/questions/$id') as Map<String, dynamic>);
+      WorkerQuestion.fromJson(await _get('/questions/$id') as Map<String, dynamic>);
 
   /// Resolves a `/img/...` or `/uploads/...` path from the API into an absolute URL, the way
   /// the alert image and question photo fields are served.
@@ -184,6 +193,6 @@ class ApiClient {
     if (path.startsWith('http://') || path.startsWith('https://')) return path;
     final trimmed = baseUrl.endsWith('/') ? baseUrl.substring(0, baseUrl.length - 1) : baseUrl;
     final rel = path.startsWith('/') ? path : '/$path';
-    return '$trimmed/api$rel';
+    return '$trimmed$rel';
   }
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'alerts_tab.dart';
 import 'ask_tab.dart';
+import 'camera_tab.dart';
 import 'report_tab.dart';
 import 'zone_tab.dart';
 
@@ -22,7 +23,7 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   int _index = 0;
 
-  static const _pages = [AlertsTab(), ZoneTab(), AskTab(), ReportTab()];
+  static const _pages = [AlertsTab(), CameraTab(), ZoneTab(), AskTab(), ReportTab()];
 
   @override
   Widget build(BuildContext context) {
@@ -34,6 +35,8 @@ class _HomeShellState extends State<HomeShell> {
         destinations: const [
           NavigationDestination(icon: Icon(Icons.notifications_outlined),
               selectedIcon: Icon(Icons.notifications), label: 'Alerts'),
+          NavigationDestination(icon: Icon(Icons.videocam_outlined),
+              selectedIcon: Icon(Icons.videocam), label: 'Camera'),
           NavigationDestination(icon: Icon(Icons.map_outlined),
               selectedIcon: Icon(Icons.map), label: 'Zone'),
           NavigationDestination(icon: Icon(Icons.forum_outlined),
