@@ -7,6 +7,7 @@ view the site manager can watch.
 
 from __future__ import annotations
 
+import struct
 import time
 
 import cv2
@@ -15,9 +16,51 @@ import pytest
 from fastapi.testclient import TestClient
 
 from fieldpilot.display.feeds import FeedRegistry, WorkerFeed
-from fieldpilot.display.server import FrameOrigin, annotate, create_app, encode_jpeg
+from fieldpilot.display.server import FrameOrigin, annotate, create_app, decode_frame, encode_jpeg
 
 from .test_browser_camera import _cfg, _jpeg, _recv, _StubEngine
+
+# --------------------------------------------------------------------------- raw-frame helpers
+
+
+def _nv21_plane(width: int, height: int, stride: int | None = None) -> bytes:
+    """A real, decodable NV21 buffer for a solid-colour image, built from OpenCV's own BGR->I420
+    conversion rather than hand-invented bytes.
+
+    `cv2.cvtColor(..., COLOR_BGR2YUV_I420)` returns Y, U, V as three *separate* planes packed
+    into one buffer; NV21 instead interleaves them as one Y plane followed by V-then-U pairs.
+    `stride` simulates a camera that pads every row past `width` — exactly the case `decode_frame`
+    has to slice back down to `width` rather than shear the image.
+    """
+
+    image = np.zeros((height, width, 3), dtype=np.uint8)
+    image[:] = (40, 180, 90)  # an arbitrary solid colour, so a round-trip check means something
+    i420 = cv2.cvtColor(image, cv2.COLOR_BGR2YUV_I420).reshape(-1)
+
+    y_size = width * height
+    uv_size = y_size // 4
+    y = i420[:y_size]
+    u = i420[y_size:y_size + uv_size]
+    v = i420[y_size + uv_size:y_size + 2 * uv_size]
+    vu = np.empty(2 * uv_size, dtype=np.uint8)
+    vu[0::2] = v
+    vu[1::2] = u
+    nv21 = np.concatenate([y, vu])
+
+    if stride is None or stride == width:
+        return nv21.tobytes()
+
+    rows = nv21.reshape(height * 3 // 2, width)
+    padded = np.full((height * 3 // 2, stride), 255, dtype=np.uint8)
+    padded[:, :width] = rows
+    return padded.reshape(-1).tobytes()
+
+
+def _raw_frame(width: int = 64, height: int = 48, stride: int | None = None, fmt: int = 1) -> bytes:
+    """The wire format `camera_stream.dart` sends: a 12-byte header, then the raw plane bytes."""
+
+    header = b"FPR1" + struct.pack(">HHHH", width, height, stride if stride is not None else width, fmt)
+    return header + _nv21_plane(width, height, stride)
 
 # --------------------------------------------------------------------------- registry
 
@@ -154,6 +197,45 @@ def test_annotate_survives_malformed_detections(detections):
     assert out.shape == image.shape
 
 
+def test_decode_frame_still_decodes_a_jpeg():
+    """The browser-camera page's payloads must keep working once the socket also accepts raw frames."""
+
+    image = decode_frame(_jpeg(48, 32))
+    assert image is not None and image.shape == (32, 48, 3)
+
+
+def test_decode_frame_round_trips_an_nv21_plane_to_the_right_shape_and_colour():
+    image = decode_frame(_raw_frame(64, 48))
+    assert image is not None
+    assert image.shape == (48, 64, 3)
+    # YUV->BGR rounding means this is approximate, not byte-exact
+    assert np.abs(image.astype(int) - np.array([40, 180, 90])).mean() < 8
+
+
+def test_decode_frame_handles_row_padding_without_shearing_the_image():
+    """The single most likely bug: a stride that exceeds width must be sliced off, not reshaped
+    straight through — otherwise padding bytes get read as if they were the next row's pixels."""
+
+    padded = decode_frame(_raw_frame(64, 48, stride=96))
+    unpadded = decode_frame(_raw_frame(64, 48, stride=64))
+    assert padded is not None and unpadded is not None
+    assert padded.shape == unpadded.shape == (48, 64, 3)
+    assert np.abs(padded.astype(int) - unpadded.astype(int)).mean() < 3
+
+
+@pytest.mark.parametrize("payload", [
+    b"",
+    b"not a jpeg and not an FPR1 frame either",
+    b"FPR1",                                                          # magic but no geometry
+    b"FPR1" + struct.pack(">HHHH", 64, 48, 64, 1),                    # geometry but no plane data
+    b"FPR1" + struct.pack(">HHHH", 0, 48, 64, 1) + b"\x00" * 128,      # zero width
+    b"FPR1" + struct.pack(">HHHH", 64, 48, 32, 1) + b"\x00" * 128,     # stride smaller than width
+    b"FPR1" + struct.pack(">HHHH", 64, 48, 64, 9) + b"\x00" * 128,     # unknown format code
+])
+def test_decode_frame_returns_none_for_malformed_payloads_instead_of_raising(payload):
+    assert decode_frame(payload) is None
+
+
 def test_encode_jpeg_produces_a_decodable_jpeg():
     image = np.zeros((32, 32, 3), dtype=np.uint8)
     cv2.rectangle(image, (4, 4), (28, 28), (30, 200, 90), -1)
@@ -204,6 +286,19 @@ def test_an_identified_phone_stream_becomes_a_watchable_feed(edge):
             assert "multipart/x-mixed-replace" in relay.headers["content-type"]
             chunk = next(relay.iter_bytes())
             assert b"--frame" in chunk and b"image/jpeg" in chunk
+
+
+def test_a_raw_phone_frame_drives_the_socket_end_to_end(edge):
+    """The phone's raw NV21 frames must produce a worker feed exactly like a browser's JPEGs do."""
+
+    with edge.websocket_connect("/ws/video?worker_id=w-3&zone=zone-b") as sock:
+        sock.send_bytes(_raw_frame(64, 48))
+        body = _recv(sock)
+
+        assert body["frame"] == {"index": 0, "width": 64, "height": 48}
+        feed = next(f for f in edge.get("/workers/live").json()["feeds"] if f["worker_id"] == "w-3")
+        assert feed["live"] is True and feed["zone"] == "zone-b"
+        assert feed["width"] == 64 and feed["height"] == 48
 
 
 def test_the_feed_is_dropped_when_the_phone_disconnects(edge):

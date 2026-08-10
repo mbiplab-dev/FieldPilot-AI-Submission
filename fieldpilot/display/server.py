@@ -16,6 +16,10 @@ Two ingest paths exist, and they are deliberately the *same* pipeline code:
   This is what lets FieldPilot run on a laptop or a phone, where the camera belongs to the browser
   and the server has no camera at all. Hazards raised from browser frames go through the very same
   event bridge, so bus → triggers → rules → alerts behaves identically for both paths.
+- worker phone — the worker app also connects to `/ws/video`, identified by `worker_id`, but ships
+  raw NV21 camera planes instead of JPEG. Encoding JPEG on the handset was the bottleneck keeping
+  it under 2 fps; `decode_frame` tells the two payload kinds apart by magic bytes and converts
+  either to the same BGR ndarray the pipeline already expects.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import struct
 import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -148,6 +153,57 @@ def decode_jpeg(payload: bytes) -> np.ndarray | None:
     if buf.size == 0:
         return None
     return cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
+
+#: `camera_stream.dart` prefixes every raw frame with this so the socket can tell a phone's raw
+#: planes apart from the browser page's JPEG bytes without relying on payload length.
+_RAW_MAGIC = b"FPR1"
+_RAW_HEADER_LEN = 12  # magic(4) + width(2) + height(2) + stride(2) + format(2), all big-endian
+_RAW_FORMAT_NV21 = 1
+
+
+def _decode_raw_nv21(payload: bytes) -> np.ndarray | None:
+    """The phone's raw-plane payload → BGR ndarray, or None when it is not a usable NV21 frame.
+
+    `startImageStream` hands the phone a single NV21 plane whose row stride can exceed its pixel
+    width (the camera pads rows for hardware alignment). Reshaping straight to `(rows, width)`
+    would read that padding as the start of the next row and shear the picture, so the buffer is
+    reshaped to the *reported* stride first and only then sliced down to `width`.
+    """
+
+    if len(payload) < _RAW_HEADER_LEN:
+        return None
+    width, height, stride, fmt = struct.unpack_from(">HHHH", payload, 4)
+    if fmt != _RAW_FORMAT_NV21 or width <= 0 or height <= 0 or stride < width:
+        return None
+
+    plane_rows = height * 3 // 2  # NV21: `height` Y rows + `height // 2` interleaved-VU rows
+    expected = stride * plane_rows
+    plane = payload[_RAW_HEADER_LEN:]
+    if len(plane) < expected:
+        return None
+
+    try:
+        yuv = np.frombuffer(plane, dtype=np.uint8, count=expected).reshape(plane_rows, stride)
+        if stride != width:
+            yuv = np.ascontiguousarray(yuv[:, :width])
+        return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_NV21)
+    except (ValueError, cv2.error):
+        # a header that lies about its own geometry must not take the socket down with it
+        return None
+
+
+def decode_frame(payload: bytes) -> np.ndarray | None:
+    """Either wire kind on `/ws/video` → BGR ndarray, or None when the payload is undecodable.
+
+    The browser-camera page still ships plain JPEG; a signed-in phone ships raw NV21 planes
+    (encoding JPEG on the handset was the frame-rate bottleneck this replaces). The two are told
+    apart by magic, not length, so neither producer needs to know the other exists.
+    """
+
+    if payload[:4] == _RAW_MAGIC:
+        return _decode_raw_nv21(payload)
+    return decode_jpeg(payload)
 
 
 def _detect(pipeline: Pipeline, frame: Frame):
@@ -628,11 +684,11 @@ def create_app(cfg: Config, source_kind: str | None = None, file_path: str | Non
                 payload = await slot.get()
                 if payload is None:
                     break
-                image = await asyncio.to_thread(decode_jpeg, payload)
+                image = await asyncio.to_thread(decode_frame, payload)
                 if image is None or image.size == 0:
                     log.warning("ignored an undecodable camera frame (%d bytes)", len(payload))
                     await websocket.send_json({
-                        "error": "The camera frame could not be decoded as a JPEG.",
+                        "error": "The camera frame could not be decoded as JPEG or a raw NV21 plane.",
                         "dropped": slot.dropped,
                     })
                     continue
