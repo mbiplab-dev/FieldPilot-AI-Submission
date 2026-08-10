@@ -25,6 +25,7 @@ import json
 import re
 import time
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -35,6 +36,7 @@ from fieldpilot.core.config import Config, load_config
 from fieldpilot.core.pipeline import Pipeline
 from fieldpilot.core.types import Frame
 from fieldpilot.core.video_source import VideoSource
+from fieldpilot.display.feeds import FeedRegistry
 from fieldpilot.display.state import LiveState
 from fieldpilot.logging_.logger import get_logger, jsonl_append, setup_logging
 
@@ -280,7 +282,7 @@ async def _publish_hazard(pipeline: Pipeline, event, result, sink) -> None:
 
 
 async def process_browser_frame(pipeline: Pipeline, image: np.ndarray, index: int,
-                                *, sink=None) -> dict:
+                                *, sink=None, origin: FrameOrigin | None = None) -> dict:
     """One browser frame → one JSON reply, with every hazard routed like a camera hazard."""
 
     loop = asyncio.get_running_loop()
@@ -299,7 +301,14 @@ async def process_browser_frame(pipeline: Pipeline, image: np.ndarray, index: in
         pipeline.hazard_count += 1
         pipeline._type_counts[event.category()] = pipeline._type_counts.get(event.category(), 0) + 1
         # so a reviewer can tell which camera path produced the alert
-        event.meta.setdefault("ingest", "browser")
+        event.meta.setdefault("ingest", origin.ingest if origin else "browser")
+        if origin is not None:
+            # Whose phone saw this. NOT the same as the hazard's own worker_id, which is the
+            # *tracked person in frame* — a rear camera mostly sees colleagues, not its owner.
+            event.meta.setdefault("source_worker", origin.worker_id)
+            event.meta.setdefault("source_camera_id", origin.camera_id)
+            if origin.zone:
+                event.meta.setdefault("source_zone", origin.zone)
         await _publish_hazard(pipeline, event, result, sink)
 
     detections, violations = _boxes_for(result, pipeline, hazards)
@@ -320,6 +329,72 @@ async def process_browser_frame(pipeline: Pipeline, image: np.ndarray, index: in
             {"type": h.hazard_type.value, "track_id": h.track_id} for h in pipeline._active
         ],
     }
+
+
+@dataclass(frozen=True)
+class FrameOrigin:
+    """Who is sending these frames, for a socket that carries an identified device.
+
+    The browser-camera page sends none of this and stays anonymous; a signed-in phone sends all of
+    it, which is what lets the manager see "Ravi's feed" rather than "some camera".
+    """
+
+    worker_id: str
+    zone: str | None = None
+    display_name: str | None = None
+    ingest: str = "phone"
+
+    @property
+    def camera_id(self) -> str:
+        """Stable per-device id, so alerts record which phone saw the hazard."""
+
+        return f"phone-{self.worker_id}"
+
+
+#: Box colours (BGR) for the relayed feed, matching the dashboard's severity language.
+_BOX_OK = (120, 190, 120)
+_BOX_VIOLATION = (60, 60, 220)
+
+
+def annotate(image: np.ndarray, detections: list[dict]) -> np.ndarray:
+    """Draw detections onto a copy of the frame for the manager's relayed view.
+
+    The phone draws its own overlay from the JSON reply, exactly as the browser page does. The
+    manager's feed is a plain MJPEG stream with no client-side canvas to draw on, so the boxes have
+    to be burned in here. Drawing on a copy keeps the pristine frame for alert snapshots.
+    """
+
+    canvas = image.copy()
+    for det in detections:
+        box = det.get("box") or []
+        if len(box) != 4:
+            continue
+        try:
+            x1, y1, x2, y2 = (int(round(float(v))) for v in box)
+        except (TypeError, ValueError):
+            # One unusable box must not cost the manager the whole annotated frame.
+            continue
+        violation = bool(det.get("is_violation"))
+        colour = _BOX_VIOLATION if violation else _BOX_OK
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), colour, 2 if violation else 1)
+        label = str(det.get("class") or det.get("category") or "")
+        if label:
+            cv2.putText(canvas, label, (x1, max(12, y1 - 5)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, colour, 1, cv2.LINE_AA)
+    return canvas
+
+
+def encode_jpeg(image: np.ndarray, quality: int = 70) -> bytes | None:
+    """JPEG-encode a frame for relay. Quality is modest on purpose — this is a monitoring view."""
+
+    ok, buf = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
+    return buf.tobytes() if ok else None
+
+
+def render_relay_frame(image: np.ndarray, detections: list[dict]) -> bytes | None:
+    """Annotate and encode in one call, so the whole CPU cost moves to a worker thread together."""
+
+    return encode_jpeg(annotate(image, detections))
 
 
 class LatestFrame:
@@ -384,6 +459,8 @@ def create_app(cfg: Config, source_kind: str | None = None, file_path: str | Non
     browser_holder: dict = {}
     browser_build_lock = asyncio.Lock()
     browser_gate = asyncio.Lock()
+    # Latest annotated frame per streaming phone, for the manager's live view.
+    feeds = FeedRegistry()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -473,7 +550,7 @@ def create_app(cfg: Config, source_kind: str | None = None, file_path: str | Non
 
     @app.get("/stats")
     async def stats() -> JSONResponse:
-        return JSONResponse(state.snapshot())
+        return JSONResponse({**state.snapshot(), "worker_feeds": feeds.stats()})
 
     @app.get("/stream")
     async def stream() -> StreamingResponse:
@@ -508,8 +585,19 @@ def create_app(cfg: Config, source_kind: str | None = None, file_path: str | Non
         return _CAMERA_PAGE
 
     @app.websocket("/ws/video")
-    async def ws_video(websocket: WebSocket) -> None:
-        """Browser-captured JPEG frames in, JSON detections out."""
+    async def ws_video(
+        websocket: WebSocket,
+        worker_id: str | None = None,
+        zone: str | None = None,
+        name: str | None = None,
+    ) -> None:
+        """Captured JPEG frames in, JSON detections out.
+
+        Two producers share this socket. The browser-camera page connects anonymously. A signed-in
+        phone passes `worker_id` (and its current `zone`), which does two extra things: hazards
+        record which device saw them, and the annotated frame is relayed to the manager under that
+        worker's name. All the AI runs here on the server either way — the phone only ships pixels.
+        """
 
         await websocket.accept()
         try:
@@ -522,6 +610,16 @@ def create_app(cfg: Config, source_kind: str | None = None, file_path: str | Non
                 await websocket.close(code=1011)
             return
 
+        origin = (
+            FrameOrigin(worker_id=worker_id.strip(), zone=(zone or "").strip() or None,
+                        display_name=(name or "").strip() or None)
+            if worker_id and worker_id.strip()
+            else None
+        )
+        if origin is not None:
+            feeds.open(origin.worker_id, zone=origin.zone, display_name=origin.display_name)
+            log.info("phone camera stream opened for %s (zone=%s)", origin.worker_id, origin.zone)
+
         slot = LatestFrame()
         reader = asyncio.create_task(_read_frames(websocket, slot))
         index = 0
@@ -532,7 +630,7 @@ def create_app(cfg: Config, source_kind: str | None = None, file_path: str | Non
                     break
                 image = await asyncio.to_thread(decode_jpeg, payload)
                 if image is None or image.size == 0:
-                    log.warning("ignored an undecodable browser frame (%d bytes)", len(payload))
+                    log.warning("ignored an undecodable camera frame (%d bytes)", len(payload))
                     await websocket.send_json({
                         "error": "The camera frame could not be decoded as a JPEG.",
                         "dropped": slot.dropped,
@@ -540,25 +638,81 @@ def create_app(cfg: Config, source_kind: str | None = None, file_path: str | Non
                     continue
                 try:
                     async with browser_gate:
-                        body = await process_browser_frame(pipeline, image, index, sink=state)
+                        body = await process_browser_frame(
+                            pipeline, image, index, sink=state, origin=origin,
+                        )
                 except (WebSocketDisconnect, asyncio.CancelledError):
                     raise
                 except Exception as exc:  # noqa: BLE001 — one bad frame must not drop the socket
-                    log.exception("browser frame processing failed")
+                    log.exception("camera frame processing failed")
                     await websocket.send_json({"error": f"Frame processing failed: {exc}"})
                     continue
                 index += 1
                 body["dropped"] = slot.dropped
+
+                if origin is not None:
+                    # Relay to the manager. Encoding is worth a thread — it is pure CPU and would
+                    # otherwise stall the event loop for every other connected phone.
+                    try:
+                        relay = await asyncio.to_thread(
+                            render_relay_frame, image, body["detections"])
+                        if relay:
+                            feeds.publish(origin.worker_id, relay,
+                                          width=body["frame"]["width"],
+                                          height=body["frame"]["height"],
+                                          hazards=len(body["hazards"]))
+                    except Exception:  # noqa: BLE001 — a failed relay must not stop detection
+                        log.exception("could not relay a frame for %s", origin.worker_id)
+
                 await websocket.send_text(json.dumps(body))
         except WebSocketDisconnect:
-            log.info("browser camera socket disconnected after %d frame(s)", index)
+            log.info("camera socket disconnected after %d frame(s)", index)
         except RuntimeError:
             # send on an already-closed socket — the client is gone, nothing to report to
-            log.debug("browser camera socket closed mid-send", exc_info=True)
+            log.debug("camera socket closed mid-send", exc_info=True)
         finally:
             reader.cancel()
             with suppress(asyncio.CancelledError, Exception):
                 await reader
+            if origin is not None:
+                feeds.close(origin.worker_id)
+                log.info("phone camera stream closed for %s", origin.worker_id)
+
+    # ------------------------------------------------------------ worker camera feeds
+
+    @app.get("/workers/live")
+    async def workers_live() -> JSONResponse:
+        """Which workers' phones are streaming right now."""
+
+        return JSONResponse({"feeds": feeds.list(), "stats": feeds.stats()})
+
+    @app.get("/workers/{worker_id}/stream")
+    async def worker_stream(worker_id: str) -> StreamingResponse:
+        """One worker's phone camera as MJPEG, annotated with what the server detected.
+
+        Served at the viewer's pace with latest-frame-wins semantics: a slow dashboard skips
+        frames rather than falling progressively further behind a live safety feed.
+        """
+
+        async def gen():
+            last_sent: bytes | None = None
+            idle = 0.0
+            boundary = b"--frame\r\n"
+            while True:
+                jpeg = feeds.frame(worker_id)
+                if jpeg is not None and jpeg is not last_sent:
+                    last_sent = jpeg
+                    idle = 0.0
+                    yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
+                else:
+                    idle += 1 / 15
+                    # The phone stopped sending (backgrounded, out of signal, battery saver).
+                    # End the response rather than hold a socket open on a dead feed.
+                    if idle > 30.0:
+                        return
+                await asyncio.sleep(1 / 15)
+
+        return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
     @app.get("/offline/status")
     async def offline_status() -> JSONResponse:

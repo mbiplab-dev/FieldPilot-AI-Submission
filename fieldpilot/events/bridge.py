@@ -42,10 +42,18 @@ def hazard_to_event(
     payload.setdefault("dedup_key", str(hazard.meta.get("ppe") or hazard.hazard_type.value))
     if hazard.bbox is not None:
         payload["bbox"] = list(hazard.bbox)
+
+    # The ingest path may know the origin better than the bridge's construction-time defaults.
+    # A phone streaming into the shared browser pipeline is the case that needs this: one bridge
+    # serves every connected device, so "which phone, in which zone" can only travel with the
+    # hazard itself. Absent these keys nothing changes.
+    source_camera = hazard.meta.get("source_camera_id")
+    source_zone = hazard.meta.get("source_zone")
+
     return Event(
         worker_id=f"w-{hazard.track_id}" if hazard.track_id is not None else None,
-        camera_id=camera_id,
-        zone=zone,
+        camera_id=str(source_camera) if source_camera else camera_id,
+        zone=str(source_zone) if source_zone else zone,
         timestamp=hazard.ts_wall,
         event_type=etype,
         confidence=float(hazard.meta.get("confidence", 1.0)),
