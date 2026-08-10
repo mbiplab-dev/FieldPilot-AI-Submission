@@ -75,8 +75,11 @@ from fieldpilot.storage import DocStore
 from fieldpilot.triggers.cache import create_cache
 from fieldpilot.triggers.engine import TriggerEngine
 from fieldpilot.workforce import (
+    MESSAGES_TABLE,
     OCCUPANCY_TABLE,
     QUESTIONS_TABLE,
+    MessageError,
+    MessageService,
     OccupancyMismatchError,
     OccupancyService,
     QuestionError,
@@ -273,6 +276,7 @@ def create_app(cfg: Config) -> FastAPI:
     # --- people: who is signed in, where they are, and what they are asking -----------
     auth = AuthService(docs, token_ttl_s=float(cfg.get("auth.token_ttl_s", 43200)))
     occupancy = OccupancyService(docs)
+    messages = MessageService(docs)
     uploads_dir = str(cfg.get("storage.uploads_dir", "data/uploads"))
     max_upload = int(cfg.get("storage.max_upload_bytes", 8 * 1024 * 1024))
     questions = QuestionService(
@@ -301,7 +305,7 @@ def create_app(cfg: Config) -> FastAPI:
         await store.start()
         await docs.start([
             ZONES_TABLE, FEEDBACK_TABLE, LEARNING_RUNS_TABLE, SETTINGS_TABLE,
-            USERS_TABLE, SESSIONS_TABLE, OCCUPANCY_TABLE, QUESTIONS_TABLE,
+            USERS_TABLE, SESSIONS_TABLE, OCCUPANCY_TABLE, QUESTIONS_TABLE, MESSAGES_TABLE,
         ])
         await zones.start()
         await auth.start(seed=None if cfg.get("auth.seed_demo_users", True) else [])
@@ -392,8 +396,14 @@ def create_app(cfg: Config) -> FastAPI:
     manager_only = require_site_manager(auth)
     worker_only = require_role(auth, "worker")
 
-    async def _save_upload(upload: UploadFile | None) -> str | None:
-        """Persist a worker photo, bounded in size, with a generated name.
+    _IMAGE_TYPES = (".jpg", ".jpeg", ".png", ".webp")
+    #: Container formats a phone or browser realistically records a voice note in.
+    _AUDIO_TYPES = (".m4a", ".aac", ".mp4", ".mp3", ".ogg", ".opus", ".wav", ".webm", ".3gp")
+
+    async def _save_upload(
+        upload: UploadFile | None, *, allowed: tuple[str, ...] = _IMAGE_TYPES,
+    ) -> str | None:
+        """Persist a worker upload, bounded in size, with a generated name.
 
         The client's filename is never trusted for the stored name — only its extension, from an
         allowlist — so an upload cannot choose where it lands or what it shadows.
@@ -402,11 +412,11 @@ def create_app(cfg: Config) -> FastAPI:
         if upload is None or not upload.filename:
             return None
         suffix = Path(upload.filename).suffix.lower()
-        if suffix not in (".jpg", ".jpeg", ".png", ".webp"):
-            raise HTTPException(400, f"unsupported image type {suffix!r}")
+        if suffix not in allowed:
+            raise HTTPException(400, f"unsupported upload type {suffix!r}")
         data = await upload.read(max_upload + 1)
         if len(data) > max_upload:
-            raise HTTPException(413, f"image exceeds the {max_upload // 1024 // 1024} MiB limit")
+            raise HTTPException(413, f"upload exceeds the {max_upload // 1024 // 1024} MiB limit")
         if not data:
             return None
         name = f"{uuid.uuid4().hex}{suffix}"
@@ -655,6 +665,116 @@ def create_app(cfg: Config) -> FastAPI:
             raise HTTPException(404, "question not found")
         await hub.publish("question", updated)
         return _question_out(updated)
+
+    # ---------------------------------------------------------------- direct messages
+
+    def _message_out(record: dict[str, Any]) -> dict[str, Any]:
+        """Wire shape: the voice note is a URL, never a filesystem path."""
+
+        out = dict(record)
+        path = out.pop("audio_path", None)
+        out["audio_url"] = f"/uploads/{Path(path).name}" if path else None
+        return out
+
+    async def _send_message(
+        *, worker_id: str, sender_role: str, sender_id: str, sender_name: str | None,
+        text: str, audio: UploadFile | None,
+    ) -> dict[str, Any]:
+        """Shared by both directions — identical validation, storage and live push."""
+
+        stored = await _save_upload(audio, allowed=_AUDIO_TYPES)
+        try:
+            record = await messages.send(
+                worker_id=worker_id, sender_role=sender_role, sender_id=sender_id,
+                sender_name=sender_name, text=text, audio_path=stored,
+            )
+        except MessageError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+        out = _message_out(record)
+        # Dashboards see every thread; the worker's own device gets only their own message,
+        # addressed by worker_id so a colleague's phone never receives someone else's conversation.
+        await hub.publish("message", out, audience="dashboard")
+        await hub.publish("message", out, audience="device", worker_id=worker_id)
+        return out
+
+    @app.get("/messages/threads")
+    async def list_threads(_: dict[str, Any] = Depends(manager_only)):
+        """The manager's inbox: one entry per worker, most recently active first."""
+
+        return {"threads": await messages.threads()}
+
+    @app.get("/messages/unread")
+    async def unread_count(user: dict[str, Any] = Depends(any_user)):
+        """Badge count. A manager counts every worker's unread; a worker counts the manager's."""
+
+        if user.get("role") == "site_manager":
+            return {"unread": await messages.unread_for_manager()}
+        worker_id = _worker_id(user)
+        thread = await messages.thread(worker_id)
+        return {"unread": sum(
+            1 for m in thread if m.get("sender_role") == "site_manager" and not m.get("read_at")
+        )}
+
+    @app.get("/messages/{worker_id}")
+    async def get_thread(
+        worker_id: str,
+        limit: int = Query(default=200, le=500),
+        user: dict[str, Any] = Depends(any_user),
+    ):
+        """One conversation. A worker may only ever read their own."""
+
+        if user.get("role") == "worker" and _worker_id(user) != worker_id:
+            raise HTTPException(403, "you can only read your own messages")
+        rows = await messages.thread(worker_id, limit=limit)
+        return {"worker_id": worker_id, "messages": [_message_out(m) for m in rows]}
+
+    @app.post("/messages/{worker_id}/read")
+    async def mark_thread_read(worker_id: str, user: dict[str, Any] = Depends(any_user)):
+        if user.get("role") == "worker" and _worker_id(user) != worker_id:
+            raise HTTPException(403, "you can only read your own messages")
+        changed = await messages.mark_read(worker_id, reader_role=str(user.get("role")))
+        return {"worker_id": worker_id, "marked_read": changed}
+
+    @app.post("/messages/{worker_id}", status_code=201)
+    async def manager_send_message(
+        worker_id: str,
+        text: str = Form(""),
+        audio: UploadFile | None = File(None),
+        user: dict[str, Any] = Depends(manager_only),
+    ):
+        """The site manager writes (or speaks) to one worker."""
+
+        return await _send_message(
+            worker_id=worker_id, sender_role="site_manager",
+            sender_id=str(user.get("user_id")),
+            sender_name=user.get("display_name") or user.get("username"),
+            text=text, audio=audio,
+        )
+
+    @app.post("/me/messages", status_code=201)
+    async def worker_send_message(
+        text: str = Form(""),
+        audio: UploadFile | None = File(None),
+        user: dict[str, Any] = Depends(worker_only),
+    ):
+        """The worker replies, by text or by holding the microphone."""
+
+        worker_id = _worker_id(user)
+        return await _send_message(
+            worker_id=worker_id, sender_role="worker", sender_id=str(user.get("user_id")),
+            sender_name=user.get("display_name") or user.get("username"),
+            text=text, audio=audio,
+        )
+
+    @app.get("/me/messages")
+    async def worker_thread(
+        limit: int = Query(default=200, le=500),
+        user: dict[str, Any] = Depends(worker_only),
+    ):
+        worker_id = _worker_id(user)
+        rows = await messages.thread(worker_id, limit=limit)
+        return {"worker_id": worker_id, "messages": [_message_out(m) for m in rows]}
 
     # ---------------------------------------------------------------- events
 

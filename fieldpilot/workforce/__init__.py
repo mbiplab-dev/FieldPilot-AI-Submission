@@ -8,10 +8,21 @@ site manager can see who is exposed and which zones are generating the most warn
 routes the question to the site manager, because an LLM alone should not be the last word on a
 safety question.
 
-Both keep the event bus out of their signatures so they stay unit-testable; `backend/app.py`
-publishes on their behalf.
+`messages` is the direct manager↔worker conversation — deliberately separate from `questions`,
+which is a formal request with a lifecycle and an LLM answer. "On my way" does not belong on the
+same review queue as an unanswered compliance question.
+
+All of these keep the event bus out of their signatures so they stay unit-testable;
+`backend/app.py` publishes on their behalf.
 """
 
+from fieldpilot.workforce.messages import (
+    MESSAGES_TABLE,
+    SENDER_ROLES,
+    MessageError,
+    MessageService,
+    resolve_audio_path,
+)
 from fieldpilot.workforce.occupancy import (
     OCCUPANCY_TABLE,
     OccupancyMismatchError,
@@ -26,12 +37,17 @@ from fieldpilot.workforce.questions import (
 )
 
 __all__ = [
+    "MESSAGES_TABLE",
     "OCCUPANCY_TABLE",
     "QUESTIONS_TABLE",
+    "SENDER_ROLES",
     "STATUSES",
+    "MessageError",
+    "MessageService",
     "OccupancyMismatchError",
     "OccupancyService",
     "QuestionError",
     "QuestionService",
+    "resolve_audio_path",
     "resolve_image_path",
 ]

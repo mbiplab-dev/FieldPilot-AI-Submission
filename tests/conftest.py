@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
+from fastapi.testclient import TestClient
 
+from fieldpilot.backend.app import create_app
 from fieldpilot.core.config import Config
 from fieldpilot.core.types import (
     KP_LEFT_ANKLE,
@@ -76,3 +79,45 @@ def make_result(t: float, index: int, persons: list[PersonDetection]) -> FrameRe
     img = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
     frame = Frame(index=index, ts_monotonic=t, image=img)
     return FrameResult(frame=frame, persons=persons)
+
+
+# --------------------------------------------------------------------------- REST API fixtures
+
+#: Seeded demo accounts (see `auth.service`). Shared so every API test signs in the same way.
+WORKER1 = {"username": "worker1", "password": "worker123"}
+WORKER2 = {"username": "worker2", "password": "worker123"}
+MANAGER = {"username": "manager", "password": "manager123"}
+
+
+@pytest.fixture()
+def client(tmp_path):
+    """A hermetic backend: SQLite store, in-memory bus, no Qdrant/Ollama/Redis/network."""
+
+    cfg = Config({
+        "events": {
+            "backend": "sqlite",
+            "database_url": str(tmp_path / "platform.db"),
+            "events_db_url": str(tmp_path / "events.db"),
+            "bus_backend": "memory",
+        },
+        "triggers": {"dedup_window_s": 45, "resolve_after_s": 90, "sweep_interval_s": 1},
+        "notifications": {"dedup_window_s": 300},
+        "reasoning": {"qdrant_url": "http://127.0.0.1:1", "ollama_host": "http://127.0.0.1:1",
+                      "blueprints_dir": str(tmp_path / "bp")},
+        "learning": {"val_set": str(tmp_path / "val"), "output_dir": str(tmp_path / "out")},
+        "detection": {"ppe_model": str(tmp_path / "missing.pt"),
+                      "models_dir": str(tmp_path / "models")},
+        "storage": {"uploads_dir": str(tmp_path / "uploads"), "max_upload_bytes": 1024 * 1024},
+        "auth": {"token_ttl_s": 3600, "seed_demo_users": True},
+    })
+    with TestClient(create_app(cfg)) as c:
+        yield c
+
+
+def login(client, creds) -> tuple[dict, dict]:
+    """Sign in and return `(user, auth_headers)`."""
+
+    r = client.post("/auth/login", json=creds)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    return body["user"], {"Authorization": f"Bearer {body['token']}"}
