@@ -191,3 +191,49 @@ class WorkerQuestion {
 /// Result of a POST /me/alerts or /zones/{id}/enter — small ad-hoc shapes that don't earn a
 /// full model, kept here as typed maps via extension getters would be overkill; plain dynamic
 /// access at the call site is fine for a one-off response.
+
+/// One message in the worker's direct thread with the site manager — text, a voice note, or both
+/// (the backend rejects neither). `senderRole` rather than a bare `fromMe` boolean because the
+/// worker app needs to render its own bubble differently from the manager's without re-deriving
+/// "who sent this" from anything else on the wire.
+class DirectMessage {
+  final String messageId;
+  final String workerId;
+  final String senderRole; // "worker" | "site_manager"
+  final String senderId;
+  final String senderName;
+  final String text;
+  final String? audioUrl;
+  final double? audioSeconds;
+  final double? readAt;
+  final double createdAt;
+
+  DirectMessage({
+    required this.messageId,
+    required this.workerId,
+    required this.senderRole,
+    required this.senderId,
+    required this.senderName,
+    required this.text,
+    required this.audioUrl,
+    required this.audioSeconds,
+    required this.readAt,
+    required this.createdAt,
+  });
+
+  bool get fromWorker => senderRole == 'worker';
+  bool get hasAudio => audioUrl != null && audioUrl!.isNotEmpty;
+
+  factory DirectMessage.fromJson(Map<String, dynamic> json) => DirectMessage(
+        messageId: json['message_id'] as String,
+        workerId: json['worker_id'] as String,
+        senderRole: (json['sender_role'] as String?) ?? 'site_manager',
+        senderId: (json['sender_id'] as String?) ?? '',
+        senderName: (json['sender_name'] as String?) ?? '',
+        text: (json['text'] as String?) ?? '',
+        audioUrl: json['audio_url'] as String?,
+        audioSeconds: (json['audio_seconds'] as num?)?.toDouble(),
+        readAt: (json['read_at'] as num?)?.toDouble(),
+        createdAt: (json['created_at'] as num?)?.toDouble() ?? 0,
+      );
+}

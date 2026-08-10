@@ -76,6 +76,8 @@ class ApiClient {
     required Map<String, String> fields,
     Uint8List? imageBytes,
     String? imageFilename,
+    Uint8List? audioBytes,
+    String? audioFilename,
   }) async {
     final request = http.MultipartRequest('POST', _uri(path));
     request.headers.addAll(_headers);
@@ -85,6 +87,13 @@ class ApiClient {
         'image',
         imageBytes,
         filename: imageFilename ?? 'photo.jpg',
+      ));
+    }
+    if (audioBytes != null) {
+      request.files.add(http.MultipartFile.fromBytes(
+        'audio',
+        audioBytes,
+        filename: audioFilename ?? 'voice.m4a',
       ));
     }
     final streamed = await request.send().timeout(timeout);
@@ -186,6 +195,37 @@ class ApiClient {
 
   Future<WorkerQuestion> question(String id) async =>
       WorkerQuestion.fromJson(await _get('/questions/$id') as Map<String, dynamic>);
+
+  // -- direct messages with the site manager --------------------------------
+
+  Future<List<DirectMessage>> myMessages() async {
+    final json = await _get('/me/messages') as Map<String, dynamic>;
+    return (json['messages'] as List)
+        .map((e) => DirectMessage.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// `text` may be empty when there is a voice note, and vice versa; the backend rejects only
+  /// the case where both are empty, so that check is left to it rather than duplicated here.
+  Future<DirectMessage> sendMessage({String text = '', Uint8List? audioBytes, String? filename}) async {
+    final json = await _multipart(
+      '/me/messages',
+      fields: {'text': text},
+      audioBytes: audioBytes,
+      audioFilename: filename,
+    );
+    return DirectMessage.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// Marks the *manager's* messages in this thread read. The same path also serves a manager
+  /// marking a worker's thread read; a worker calling it may only pass their own id, and the
+  /// backend — not this client — is what enforces that with a 403.
+  Future<void> markMessagesRead(String workerId) => _postEmpty('/messages/$workerId/read');
+
+  Future<int> unreadMessages() async {
+    final json = await _get('/messages/unread') as Map<String, dynamic>;
+    return (json['unread'] as num?)?.toInt() ?? 0;
+  }
 
   /// Resolves a `/img/...` or `/uploads/...` path from the API into an absolute URL, the way
   /// the alert image and question photo fields are served.
