@@ -234,15 +234,20 @@ class _ZoneRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    // Reuse the severity palette's "critical" red rather than the raw Material red this used to
+    // hardcode: that literal was fine on this card's light-mode white background but far too dark
+    // to read on the same card once it goes near-black in dark mode. `severityColor` already
+    // carries a shade tuned for each surface.
+    final dangerColor = severityColor(context, 'critical');
     return Card(
       margin: EdgeInsets.zero,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: ListTile(
         leading: CircleAvatar(
-          backgroundColor: (zone.danger ? Colors.red : theme.colorScheme.primary).withValues(alpha: 0.12),
+          backgroundColor: (zone.danger ? dangerColor : theme.colorScheme.primary).withValues(alpha: 0.12),
           child: Icon(
             zone.danger ? Icons.warning_amber_rounded : Icons.place_outlined,
-            color: zone.danger ? Colors.red : theme.colorScheme.primary,
+            color: zone.danger ? dangerColor : theme.colorScheme.primary,
           ),
         ),
         title: Text(zone.name),
@@ -251,7 +256,7 @@ class _ZoneRow extends StatelessWidget {
             HazardLevelChip(level: zone.hazardLevel),
             if (zone.danger) ...[
               const SizedBox(width: 6),
-              const Text('Danger zone', style: TextStyle(fontSize: 11, color: Colors.red)),
+              Text('Danger zone', style: TextStyle(fontSize: 11, color: dangerColor)),
             ],
           ],
         ),

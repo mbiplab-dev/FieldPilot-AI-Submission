@@ -56,7 +56,10 @@ class LiveFrame {
 /// so dropping the socket must never cost the worker data they can still fetch.
 class LiveFeed extends ChangeNotifier {
   static const _pingInterval = Duration(seconds: 25);
-  static const _maxBackoff = Duration(seconds: 15);
+  // Was 15s: on a site with patchy wifi, a hole that size in live push reads as "broken" even
+  // though polling is quietly covering for it. 6s is still enough backoff to not hammer a
+  // genuinely dead backend, but short enough that the socket keeps trying to earn back "live".
+  static const _maxBackoff = Duration(seconds: 6);
 
   /// Newest first, capped — a phone has no use for an unbounded backlog.
   static const _bufferSize = 40;

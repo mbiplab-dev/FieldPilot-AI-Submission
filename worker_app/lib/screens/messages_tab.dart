@@ -410,17 +410,24 @@ class _Composer extends StatelessWidget {
                         recording ? theme.colorScheme.error : theme.colorScheme.primaryContainer,
                     child: Icon(
                       Icons.mic,
-                      color: recording ? Colors.white : theme.colorScheme.onPrimaryContainer,
+                      // `onError`, not a literal white: Material 3's dark scheme makes `error`
+                      // itself a pale colour for contrast against a dark surface, so a hardcoded
+                      // white icon on top of it would nearly disappear.
+                      color: recording ? theme.colorScheme.onError : theme.colorScheme.onPrimaryContainer,
                     ),
                   ),
                 ),
                 const SizedBox(width: 6),
                 IconButton.filled(
                   icon: sending
-                      ? const SizedBox(
+                      ? SizedBox(
                           width: 16,
                           height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                          // See the identical comment in ask_tab.dart: `IconButton.filled`'s
+                          // background is `colorScheme.primary`, which is light in dark mode, so
+                          // the spinner needs `onPrimary`, not a literal white, to stay visible.
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: theme.colorScheme.onPrimary))
                       : const Icon(Icons.send),
                   onPressed: sending || recording ? null : onSendText,
                 ),

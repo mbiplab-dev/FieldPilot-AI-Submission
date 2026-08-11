@@ -87,6 +87,11 @@ class CameraStreamer extends ChangeNotifier {
   String? error;
   DateTime? _lastFrameAt;
 
+  /// The worker's own intent, independent of whether the hardware is actually open right now.
+  /// Set by [start]/[stop]; read by [resumeFromBackground] so a foreground transition only
+  /// reopens the camera the worker had asked for, never one they had deliberately stopped.
+  bool _wantOn = false;
+
   int targetFps = defaultTargetFps;
 
   CameraController? get controller => _controller;
@@ -105,6 +110,16 @@ class CameraStreamer extends ChangeNotifier {
     String? displayName,
   }) async {
     if (_streaming || _starting) return;
+    if (workerId.isEmpty) {
+      // Surfaced on the Camera tab rather than thrown: a missing worker id is a site-manager
+      // configuration problem to fix, not a transient camera failure worth retrying on its own.
+      // This used to be a check the tab made before calling start() at all; it moved here so the
+      // auto-start path on sign-in (which has no snackbar to show) fails just as visibly.
+      error = 'This account has no worker id, so a feed could not be labelled. Ask your site manager.';
+      notifyListeners();
+      return;
+    }
+    _wantOn = true;
     _starting = true;
     error = null;
     notifyListeners();
@@ -259,8 +274,54 @@ class CameraStreamer extends ChangeNotifier {
   }
 
   Future<void> stop() async {
+    _wantOn = false;
     _streaming = false;
     await _teardown();
+    notifyListeners();
+  }
+
+  /// Releases the camera without touching [_wantOn], so this reads as "paused", not "stopped".
+  ///
+  /// Called on `didChangeAppLifecycleState` rather than left for [dispose] to sort out: Android
+  /// can revoke a backgrounded app's camera access out from under it, and a [CameraController]
+  /// that thinks it is still streaming when the surface goes away is the classic way this crashes.
+  /// Tearing it down proactively on backgrounding — the same [_teardown] a deliberate [stop] uses —
+  /// means there is never a controller alive for Android to pull the rug out from under.
+  Future<void> pauseForBackground() async {
+    if (!_streaming) return;
+    _streaming = false;
+    await _teardown();
+    notifyListeners();
+  }
+
+  /// Reopens the camera after [pauseForBackground] — but only if the worker had it on before the
+  /// app was backgrounded. Without the [_wantOn] check, a worker who deliberately pressed STOP and
+  /// then locked their phone would find the camera back on when they unlocked it, which is exactly
+  /// the surveillance-without-consent failure mode this feature has to avoid.
+  Future<void> resumeFromBackground({
+    required String edgeUrl,
+    required String workerId,
+    String? zone,
+    String? displayName,
+  }) async {
+    if (!_wantOn) return;
+    await start(edgeUrl: edgeUrl, workerId: workerId, zone: zone, displayName: displayName);
+  }
+
+  /// Zeroes the running counters and any stale error message.
+  ///
+  /// This streamer now lives for the app's process lifetime (provided above `_SignedIn` in
+  /// `main.dart`, so the camera can start the instant a session exists rather than only once the
+  /// Camera tab is built) instead of being recreated per sign-in. Without an explicit reset, a
+  /// second worker signing in on the same phone would inherit the first worker's frame count and
+  /// last error on screen.
+  void reset() {
+    framesSent = 0;
+    hazardsSeen = 0;
+    peopleSeen = 0;
+    fps = 0;
+    inferenceMs = null;
+    error = null;
     notifyListeners();
   }
 

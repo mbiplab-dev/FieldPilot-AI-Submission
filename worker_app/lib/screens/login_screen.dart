@@ -79,10 +79,16 @@ class _LoginScreenState extends State<LoginScreen> {
                           color: theme.colorScheme.primary,
                           borderRadius: BorderRadius.circular(16),
                         ),
-                        child: const Center(
+                        child: Center(
                           child: Text('FP',
                               style: TextStyle(
-                                  color: Colors.white, fontWeight: FontWeight.w800, fontSize: 22)),
+                                  // `onPrimary`, not a literal white: Material 3's dark scheme
+                                  // makes `primary` itself a light colour, and white-on-light-blue
+                                  // is close to unreadable — `onPrimary` is chosen to contrast with
+                                  // whatever `primary` resolves to in either mode.
+                                  color: theme.colorScheme.onPrimary,
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 22)),
                         ),
                       ),
                     ),
@@ -149,10 +155,11 @@ class _LoginScreenState extends State<LoginScreen> {
                         minimumSize: const Size.fromHeight(52),
                       ),
                       child: _submitting
-                          ? const SizedBox(
+                          ? SizedBox(
                               width: 20,
                               height: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2.4, color: Colors.white),
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2.4, color: theme.colorScheme.onPrimary),
                             )
                           : const Text('Sign in'),
                     ),

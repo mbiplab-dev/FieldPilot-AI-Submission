@@ -247,10 +247,15 @@ class _Composer extends StatelessWidget {
                 const SizedBox(width: 6),
                 IconButton.filled(
                   icon: sending
-                      ? const SizedBox(
+                      ? SizedBox(
                           width: 16,
                           height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                          // `onPrimary`, matching the icon it replaces: `IconButton.filled`'s
+                          // default background is `colorScheme.primary`, which is not always a
+                          // dark colour (Material 3's dark theme lightens it), so a literal white
+                          // spinner was invisible against it there.
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: theme.colorScheme.onPrimary))
                       : const Icon(Icons.send),
                   onPressed: sending ? null : onSend,
                 ),

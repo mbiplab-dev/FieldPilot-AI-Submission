@@ -23,8 +23,20 @@ class ApiClient {
   final String baseUrl;
   final String? token;
   final Duration timeout;
+  final Duration quickTimeout;
 
-  ApiClient({required this.baseUrl, this.token, this.timeout = const Duration(seconds: 20)});
+  /// 20s used to be the default for every call, which means a dead server took 20s to say so —
+  /// intolerable for a worker standing in front of a hazard waiting on a reply. 8s is still
+  /// generous for a LAN round trip (including the multipart calls that carry a photo or a short
+  /// voice note); [quickTimeout] is shorter still, for the plain-JSON reads (`myAlerts`, `myZone`,
+  /// `unreadMessages`, …) that the screens re-issue on every pull-to-refresh — there is nothing
+  /// gained by waiting as long on those as on a call carrying a file.
+  ApiClient({
+    required this.baseUrl,
+    this.token,
+    this.timeout = const Duration(seconds: 8),
+    this.quickTimeout = const Duration(seconds: 5),
+  });
 
   Uri _uri(String path, [Map<String, String>? query]) {
     final trimmed = baseUrl.endsWith('/') ? baseUrl.substring(0, baseUrl.length - 1) : baseUrl;
@@ -53,7 +65,7 @@ class ApiClient {
 
   Future<dynamic> _get(String path, [Map<String, String>? query]) async {
     final response =
-        await http.get(_uri(path, query), headers: _headers).timeout(timeout);
+        await http.get(_uri(path, query), headers: _headers).timeout(quickTimeout);
     return _decode(response);
   }
 

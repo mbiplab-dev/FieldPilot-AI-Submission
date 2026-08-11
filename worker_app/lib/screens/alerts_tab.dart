@@ -226,7 +226,7 @@ class _AlertCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final color = severityColor(alert.severity);
+    final color = severityColor(context, alert.severity);
     return Card(
       margin: EdgeInsets.zero,
       clipBehavior: Clip.antiAlias,

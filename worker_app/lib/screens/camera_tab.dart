@@ -8,44 +8,31 @@ import '../widgets/common.dart';
 
 /// The worker's camera, streamed to the server for analysis and to the site manager to watch.
 ///
-/// Streaming is explicitly opt-in and clearly indicated while running. A camera that started
-/// itself, or ran without saying so, would be a surveillance device rather than a safety tool —
-/// the worker holding the phone should always know when their feed is being watched.
-class CameraTab extends StatefulWidget {
+/// The streamer itself is owned above [HomeShell] now (see `_SignedIn` in `main.dart`), not by
+/// this tab's `State` — it starts the moment a session exists, not when the worker happens to
+/// open this tab, so this widget is just a renderer of whatever [CameraStreamer] the app-wide
+/// provider hands it plus a control to stop/resume it.
+///
+/// Auto-starting does not make this any less the worker's camera to control, though: it stays
+/// clearly indicated while running (the red "LIVE" badge in [_LiveBadge]) and stays stoppable at
+/// a tap (the button in [_Controls] always reads STOP while live). A camera that started itself
+/// and gave the person carrying it no way to see or end that would be a surveillance device
+/// wearing a safety app's name; what changed here is the default, not that guarantee.
+class CameraTab extends StatelessWidget {
   const CameraTab({super.key});
 
-  @override
-  State<CameraTab> createState() => _CameraTabState();
-}
-
-class _CameraTabState extends State<CameraTab> {
-  final _streamer = CameraStreamer();
-
-  @override
-  void dispose() {
-    _streamer.dispose();
-    super.dispose();
-  }
-
-  Future<void> _toggle() async {
-    if (_streamer.streaming) {
-      await _streamer.stop();
+  Future<void> _toggle(BuildContext context) async {
+    final streamer = context.read<CameraStreamer>();
+    if (streamer.streaming) {
+      await streamer.stop();
       return;
     }
+    // Read before the `await` inside `start` — the same rule every other screen in this app
+    // follows, because `context` is not safe to touch again after an async gap.
     final session = context.read<Session>();
-    final workerId = session.user?.workerId;
-    if (workerId == null || workerId.isEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text(
-          'This account has no worker id, so a feed could not be labelled. Ask your site manager.',
-        ),
-      ));
-      return;
-    }
-    await _streamer.start(
+    await streamer.start(
       edgeUrl: session.edgeUrl,
-      workerId: workerId,
+      workerId: session.user?.workerId ?? '',
       zone: session.currentZoneId,
       displayName: session.user?.displayName,
     );
@@ -53,20 +40,17 @@ class _CameraTabState extends State<CameraTab> {
 
   @override
   Widget build(BuildContext context) {
-    return ChangeNotifierProvider.value(
-      value: _streamer,
-      child: Consumer<CameraStreamer>(
-        builder: (context, streamer, _) => Scaffold(
-          appBar: AppBar(
-            title: const Text('Site camera'),
-            actions: const [VoiceAction(), AccountAction(), SizedBox(width: 4)],
-          ),
-          body: Column(
-            children: [
-              Expanded(child: _Preview(streamer: streamer)),
-              _Controls(streamer: streamer, onToggle: _toggle),
-            ],
-          ),
+    return Consumer<CameraStreamer>(
+      builder: (context, streamer, _) => Scaffold(
+        appBar: AppBar(
+          title: const Text('Site camera'),
+          actions: const [VoiceAction(), AccountAction(), SizedBox(width: 4)],
+        ),
+        body: Column(
+          children: [
+            Expanded(child: _Preview(streamer: streamer)),
+            _Controls(streamer: streamer, onToggle: () => _toggle(context)),
+          ],
         ),
       ),
     );
@@ -98,7 +82,7 @@ class _Preview extends StatelessWidget {
               Text('Camera off', style: theme.textTheme.titleMedium),
               const SizedBox(height: 6),
               Text(
-                'Start the feed to let the site manager see what you see. '
+                'Resume the feed to let the site manager see what you see. '
                 'All analysis runs on the server — your phone only sends the picture.',
                 textAlign: TextAlign.center,
                 style: theme.textTheme.bodySmall
@@ -164,11 +148,21 @@ class _LiveBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // The "live" red has to stay red regardless of app theme — it is the one indicator this
+    // whole feature exists to keep visible (see the note on `CameraTab`), not a decorative accent
+    // to retune per mode.
     final colour = connected ? const Color(0xFFDC2626) : const Color(0xFF64748B);
+    final theme = Theme.of(context);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.55),
+        // This scrim floats over the live camera preview, not over app chrome, so a plain
+        // "black behind white text" was never actually a light/dark bug on its own — but it also
+        // never went through the theme, which made it the odd one out. `inverseSurface`/
+        // `onInverseSurface` is Material's own pairing for exactly this — content that must read
+        // clearly no matter what is behind or around it (it is what `SnackBar` uses) — so this
+        // gets the same guarantee for free instead of a second hand-picked pair of literals.
+        color: theme.colorScheme.inverseSurface.withValues(alpha: 0.72),
         borderRadius: BorderRadius.circular(20),
       ),
       child: Row(
@@ -178,7 +172,11 @@ class _LiveBadge extends StatelessWidget {
           const SizedBox(width: 6),
           Text(
             connected ? 'LIVE — manager can see this' : 'Connecting…',
-            style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w700),
+            style: TextStyle(
+              color: theme.colorScheme.onInverseSurface,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+            ),
           ),
         ],
       ),
@@ -223,10 +221,16 @@ class _Controls extends StatelessWidget {
               onPressed: streamer.starting ? null : onToggle,
               style: FilledButton.styleFrom(
                 backgroundColor: on ? theme.colorScheme.error : theme.colorScheme.primary,
+                // Overriding `backgroundColor` alone leaves the label/icon on the button's
+                // default foreground, which is picked to contrast with `primary` — wrong the
+                // moment the background switches to `error` instead. Pairing each background
+                // with its matching `on*` colour is what actually keeps this readable, in either
+                // theme, rather than working by coincidence in just one of them.
+                foregroundColor: on ? theme.colorScheme.onError : theme.colorScheme.onPrimary,
               ),
               icon: Icon(on ? Icons.stop_rounded : Icons.videocam_rounded),
               label: Text(
-                on ? 'STOP STREAMING' : 'START CAMERA FEED',
+                on ? 'STOP STREAMING' : 'RESUME CAMERA FEED',
                 style: const TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.4),
               ),
             ),
@@ -235,7 +239,7 @@ class _Controls extends StatelessWidget {
           Text(
             on
                 ? 'Analysis runs on the server. Detected hazards are spoken to you and raised with your manager.'
-                : 'Your camera is off. Nothing is sent until you start it.',
+                : 'Your camera is off. Nothing is sent until you resume it.',
             textAlign: TextAlign.center,
             style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
           ),

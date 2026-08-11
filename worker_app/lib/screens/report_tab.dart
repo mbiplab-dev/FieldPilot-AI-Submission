@@ -77,7 +77,7 @@ class _HazardButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = severityColor(type.defaultSeverity);
+    final color = severityColor(context, type.defaultSeverity);
     return Material(
       color: color.withValues(alpha: 0.10),
       borderRadius: BorderRadius.circular(18),
@@ -169,7 +169,7 @@ class _ReportSheetState extends State<_ReportSheet> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final color = severityColor(_severity);
+    final color = severityColor(context, _severity);
 
     if (_sent) {
       return Padding(
@@ -222,7 +222,7 @@ class _ReportSheetState extends State<_ReportSheet> {
               spacing: 8,
               children: _severities.map((s) {
                 final selected = s == _severity;
-                final c = severityColor(s);
+                final c = severityColor(context, s);
                 return ChoiceChip(
                   label: Text(s.toUpperCase()),
                   selected: selected,

@@ -94,7 +94,12 @@ class LiveDot extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final connected = context.watch<LiveFeed>().connected;
-    final color = connected ? const Color(0xFF16A34A) : const Color(0xFF94A3B8);
+    // "Connected" stays a fixed green — it is good news in either theme, and green-on-either-
+    // surface reads fine at this size. "Offline" used to be a flat slate hex that was fine on a
+    // dark AppBar but washed out to near-invisible on a light one; `onSurfaceVariant` is the
+    // theme's own muted-text colour, so it is guaranteed legible on whichever surface it lands on.
+    final theme = Theme.of(context);
+    final color = connected ? const Color(0xFF16A34A) : theme.colorScheme.onSurfaceVariant;
     return Tooltip(
       message: connected
           ? 'Live — hazards arrive within seconds'
@@ -117,14 +122,33 @@ class LiveDot extends StatelessWidget {
   }
 }
 
-const _severityColors = {
-  'low': Color(0xFF64748B),
-  'medium': Color(0xFFD97706),
-  'high': Color(0xFFDC2626),
-  'critical': Color(0xFF991B1B),
+// Tuned per surface, not just picked once: a dark, serious red ("critical" on light) reads as
+// sober and deliberate on a white card, but the same hex on a near-black dark-theme card is
+// nearly invisible — exactly the "hardcoded colour that only works in one mode" failure this
+// pair exists to avoid. Each mode keeps the same low→critical hue story (slate → amber → red →
+// deeper/more-saturated red) so severity is still recognisable at a glance either way; only the
+// lightness moves to stay legible against that mode's own surface colour.
+const _severityColorsLight = {
+  'low': Color(0xFF475569), // slate-600
+  'medium': Color(0xFFB45309), // amber-700
+  'high': Color(0xFFDC2626), // red-600
+  'critical': Color(0xFF991B1B), // red-800 — darker/deeper than "high" reads as more sober
 };
 
-Color severityColor(String severity) => _severityColors[severity] ?? _severityColors['medium']!;
+const _severityColorsDark = {
+  'low': Color(0xFFCBD5E1), // slate-300
+  'medium': Color(0xFFFBBF24), // amber-400
+  'high': Color(0xFFF87171), // red-400
+  'critical': Color(0xFFEF4444), // red-500 — more saturated than "high" reads as more urgent
+};
+
+/// Needs [context] (not just a lookup by string) because the right shade depends on which
+/// surface it is about to sit on — see the palettes above.
+Color severityColor(BuildContext context, String severity) {
+  final palette =
+      Theme.of(context).brightness == Brightness.dark ? _severityColorsDark : _severityColorsLight;
+  return palette[severity] ?? palette['medium']!;
+}
 
 class SeverityChip extends StatelessWidget {
   final String severity;
@@ -132,7 +156,7 @@ class SeverityChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = severityColor(severity);
+    final color = severityColor(context, severity);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
