@@ -73,6 +73,7 @@ class LiveFeed extends ChangeNotifier {
   Timer? _reconnectTimer;
 
   String? _baseUrl;
+  String? _token;
   String? _workerId;
   String? _zone;
 
@@ -89,14 +90,27 @@ class LiveFeed extends ChangeNotifier {
 
   /// (Re)point the socket. Called on sign-in and whenever the worker's zone changes, since the
   /// hub scopes advisories by the zone the device registered.
-  void connect({required String baseUrl, required String? workerId, String? zone}) {
+  ///
+  /// [workerId] is kept as a parameter so every call site did not need touching when the backend
+  /// stopped trusting it (C3): the server now derives the caller's own worker id from [token]
+  /// and ignores anything a client declares, so this value is no longer sent over the wire — it
+  /// stays only so `unchanged` still notices a worker-id change (e.g. sign-out/sign-in as someone
+  /// else) and reconnects.
+  void connect({
+    required String baseUrl,
+    required String? token,
+    required String? workerId,
+    String? zone,
+  }) {
     if (_disposed) return;
-    final unchanged = _baseUrl == baseUrl && _workerId == workerId && _zone == zone;
+    final unchanged = _baseUrl == baseUrl && _token == token && _workerId == workerId &&
+        _zone == zone;
     // Idempotent on purpose: this is called on every session change, and tearing down a socket
     // that is connected — or a backoff timer that is mid-retry — would turn a routine rebuild
     // into a reconnect loop that never settles.
     if (unchanged && (_channel != null || _reconnectTimer != null)) return;
     _baseUrl = baseUrl;
+    _token = token;
     _workerId = workerId;
     _zone = zone;
     _attempt = 0;
@@ -108,6 +122,7 @@ class LiveFeed extends ChangeNotifier {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     _baseUrl = null;
+    _token = null;
     if (_connected) {
       _connected = false;
       notifyListeners();
@@ -116,11 +131,14 @@ class LiveFeed extends ChangeNotifier {
 
   Uri? _uri() {
     final base = _baseUrl;
-    if (base == null) return null;
-    // The API base is http(s); the socket shares host and port but swaps scheme.
+    final token = _token;
+    // No token, no socket: a browser/phone cannot send an Authorization header over a WebSocket
+    // handshake, so the session token travels as `?token=...` instead — the backend resolves it
+    // with the same AuthService the REST routes use, and derives `kind`/worker identity from it
+    // rather than from anything declared here.
+    if (base == null || token == null || token.isEmpty) return null;
     final http = Uri.parse(base);
-    final query = <String, String>{'kind': 'device'};
-    if (_workerId != null && _workerId!.isNotEmpty) query['worker_id'] = _workerId!;
+    final query = <String, String>{'token': token};
     if (_zone != null && _zone!.isNotEmpty) query['zone'] = _zone!;
     return http.replace(
       scheme: http.scheme == 'https' ? 'wss' : 'ws',

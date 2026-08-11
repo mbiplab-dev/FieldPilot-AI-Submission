@@ -40,6 +40,10 @@ class Session extends ChangeNotifier {
 
   ApiClient get api => ApiClient(baseUrl: serverUrl, token: _token);
 
+  /// The bearer token, for the one caller that cannot send it as a header: [LiveFeed]'s
+  /// WebSocket handshake, which has to pass it as `?token=...` instead.
+  String? get token => _token;
+
   bool get isSignedIn => _token != null && user != null;
 
   Future<void> restore() async {

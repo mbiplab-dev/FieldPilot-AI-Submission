@@ -13,10 +13,11 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from fieldpilot.backend.app import create_app
 from fieldpilot.core.config import Config
-from tests.conftest import MANAGER, login
+from tests.conftest import MANAGER, WORKER1, WORKER2, login
 
 
 @pytest.fixture()
@@ -358,9 +359,18 @@ def test_health_reports_every_subsystem(client):
 
 def test_websocket_delivers_alerts_to_dashboards_and_advisories_to_zone_devices(client):
     _, manager_h = login(client, MANAGER)
-    with client.websocket_connect("/ws?kind=dashboard") as dash, \
-         client.websocket_connect("/ws?kind=device&zone=zone-a&worker_id=w-9") as dev_a, \
-         client.websocket_connect("/ws?kind=device&zone=zone-b&worker_id=w-3") as dev_b:
+    manager_token = manager_h["Authorization"].removeprefix("Bearer ")
+    _, w1_h = login(client, WORKER1)
+    worker1_token = w1_h["Authorization"].removeprefix("Bearer ")
+    _, w2_h = login(client, WORKER2)
+    worker2_token = w2_h["Authorization"].removeprefix("Bearer ")
+
+    # `kind` and `worker_id` are no longer client-declared (C3) — the socket derives both from
+    # whose token this is, so a site manager's token is what makes `dash` a dashboard, and each
+    # worker's own token is what makes their socket a device scoped to their own worker_id.
+    with client.websocket_connect(f"/ws?token={manager_token}") as dash, \
+         client.websocket_connect(f"/ws?token={worker1_token}&zone=zone-a") as dev_a, \
+         client.websocket_connect(f"/ws?token={worker2_token}&zone=zone-b") as dev_b:
         for sock in (dash, dev_a, dev_b):
             assert sock.receive_json()["topic"] == "hello"
 
@@ -397,3 +407,33 @@ def test_websocket_delivers_alerts_to_dashboards_and_advisories_to_zone_devices(
             f"a zone-b device received {sentinel['topic']!r} before the sentinel — "
             "a zone-a advisory leaked across zones"
         )
+
+
+def test_websocket_rejects_a_missing_or_invalid_token(client):
+    """C3: no token, and a token that does not resolve, must both fail the handshake."""
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/ws"):
+            pass
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/ws?token=not-a-real-token"):
+            pass
+
+
+def test_websocket_derives_identity_from_the_token_not_the_query_string(client):
+    """C3: `?kind=dashboard&worker_id=w-2` must not override what the worker's own token says."""
+
+    _, manager_h = login(client, MANAGER)
+    _, w1_h = login(client, WORKER1)
+    worker1_token = w1_h["Authorization"].removeprefix("Bearer ")
+
+    with client.websocket_connect(
+        f"/ws?token={worker1_token}&kind=dashboard&worker_id=w-2&zone=zone-a"
+    ) as sock:
+        hello = sock.receive_json()
+        assert hello["data"]["kind"] == "device", "a worker's socket is always `device`"
+
+        clients = client.get("/broadcast/clients", headers=manager_h).json()["clients"]
+        mine = next(c for c in clients if c["client_id"] == hello["data"]["client_id"])
+        assert mine["worker_id"] == "w-1", "worker_id must come from the token, not the query"
+        assert mine["zone"] == "zone-a", "zone is still a legitimate client-supplied filter"

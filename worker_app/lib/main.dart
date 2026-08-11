@@ -157,6 +157,7 @@ class _SignedInState extends State<_SignedIn> with WidgetsBindingObserver {
     if (session == null || feed == null || !session.isSignedIn) return;
     feed.connect(
       baseUrl: session.serverUrl,
+      token: session.token,
       workerId: session.user?.workerId,
       zone: session.currentZoneId,
     );

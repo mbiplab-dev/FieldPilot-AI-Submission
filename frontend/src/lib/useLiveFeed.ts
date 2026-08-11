@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useEffectEvent, useState } from "react";
+import { useSession } from "@/lib/useSession";
 
 /**
  * Resilient client for the backend broadcast socket (`ws://<host>:8100/ws`).
@@ -28,8 +29,6 @@ export interface LiveFrame {
 }
 
 export interface UseLiveFeedOptions {
-  /** `dashboard` (default) or `device`. */
-  kind?: string;
   /** Restrict the server-side stream to a single zone. */
   zone?: string;
   /** Only keep these topics in `frames` / `last` and only call `onFrame` for them. */
@@ -64,7 +63,15 @@ const MAX_BACKOFF_MS = 15_000;
 /** Monotonic frame counter — only ever touched from socket callbacks. */
 let frameSeq = 0;
 
-export function liveFeedUrl(kind: string, zone?: string): string {
+/**
+ * `token` is the same bearer token the REST client sends as an `Authorization` header — a
+ * WebSocket handshake from a browser cannot carry custom headers, so it travels as a query
+ * parameter instead. The backend derives `kind` and the caller's identity from this token now
+ * (C3: it used to trust a client-declared `?kind=` / `?worker_id=`, which let any socket claim
+ * to be anyone's dashboard or device); `kind` is no longer sent because the server no longer
+ * reads it.
+ */
+export function liveFeedUrl(token: string | null, zone?: string): string {
   const override = process.env.NEXT_PUBLIC_FIELDPILOT_WS;
   let base: string;
   if (override && override.length > 0) {
@@ -75,9 +82,11 @@ export function liveFeedUrl(kind: string, zone?: string): string {
     const scheme = window.location.protocol === "https:" ? "wss" : "ws";
     base = `${scheme}://${window.location.hostname}:${DEFAULT_PORT}/ws`;
   }
-  const query = new URLSearchParams({ kind });
+  const query = new URLSearchParams();
+  if (token) query.set("token", token);
   if (zone) query.set("zone", zone);
-  return `${base}${base.includes("?") ? "&" : "?"}${query.toString()}`;
+  const qs = query.toString();
+  return qs ? `${base}${base.includes("?") ? "&" : "?"}${qs}` : base;
 }
 
 function decodeFrame(raw: string): LiveFrame | null {
@@ -103,7 +112,7 @@ function decodeFrame(raw: string): LiveFrame | null {
 }
 
 export function useLiveFeed(options: UseLiveFeedOptions = {}): LiveFeed {
-  const { kind = "dashboard", zone, enabled = true, bufferSize = 60 } = options;
+  const { zone, enabled = true, bufferSize = 60 } = options;
 
   const [frames, setFrames] = useState<LiveFrame[]>([]);
   const [connected, setConnected] = useState(false);
@@ -118,10 +127,14 @@ export function useLiveFeed(options: UseLiveFeedOptions = {}): LiveFeed {
     options.onFrame?.(frame);
   });
 
-  useEffect(() => {
-    if (!enabled || typeof window === "undefined") return;
+  // Reactive (not a bare `sessionToken()` read) so signing out — or a stale token finally being
+  // noticed — tears the socket down and, on a fresh sign-in, reopens it with the new token.
+  const { token } = useSession();
 
-    const url = liveFeedUrl(kind, zone);
+  useEffect(() => {
+    if (!enabled || typeof window === "undefined" || !token) return;
+
+    const url = liveFeedUrl(token, zone);
     let disposed = false;
     let socket: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -223,7 +236,7 @@ export function useLiveFeed(options: UseLiveFeedOptions = {}): LiveFeed {
       }
       teardownSocket();
     };
-  }, [enabled, kind, zone]);
+  }, [enabled, token, zone]);
 
   const clear = useCallback(() => setFrames([]), []);
 

@@ -1278,11 +1278,42 @@ def create_app(cfg: Config) -> FastAPI:
     @app.websocket("/ws")
     async def websocket_endpoint(
         ws: WebSocket,
-        kind: str = "dashboard",
+        token: str | None = None,
         zone: str | None = None,
-        worker_id: str | None = None,
     ):
-        """Live push. Devices pass `kind=device&zone=…` to get zone-scoped advisories."""
+        """Live push, scoped by who the token says the caller is.
+
+        A browser cannot attach an `Authorization` header to a WebSocket handshake, so the same
+        session token the REST routes take as a bearer header travels here as `?token=…` instead
+        — `AuthService.resolve_token` doesn't care which transport handed it the token.
+
+        `kind` and `worker_id` used to come straight from the query string (C3): connect with
+        `?kind=dashboard` and you tapped every dashboard broadcast site-wide, `?kind=device&
+        worker_id=w-2` and you got a colleague's hazard alerts. Both are now derived from the
+        resolved identity — a site manager is always `dashboard`, a worker is always `device`
+        scoped to their own `worker_id` — so nothing a client sends over the wire can widen what
+        it receives. `zone` stays client-supplied: it narrows a subscription, it does not assert
+        an identity.
+        """
+
+        user = await auth.resolve_token(token) if token else None
+        if user is None:
+            # A close before accept() is a valid handshake rejection (ASGI allows either
+            # "websocket.accept" or "websocket.close" as the first response) — the caller sees a
+            # failed connection instead of a socket that opens and then silently sends nothing.
+            await ws.close(code=1008)  # 1008 Policy Violation
+            return
+
+        if user.get("role") == "worker":
+            worker_id = user.get("worker_id")
+            if not worker_id:
+                # Same condition `_worker_id` turns into a 409 on the REST side — an account with
+                # no site presence has nothing to scope a device connection to.
+                await ws.close(code=1008)
+                return
+            kind = "device"
+        else:
+            kind, worker_id = "dashboard", None
 
         await ws.accept()
         client = await hub.connect(ws, kind=kind, zone=zone, worker_id=worker_id)
