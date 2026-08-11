@@ -1,4 +1,4 @@
-"""Spatial calibration & measurement (Milestone 2 / possibilities.md "measure distances").
+"""Spatial calibration & measurement (Milestone 2 / docs/possibilities.md "measure distances").
 
 Uses a known physical reference object (e.g. a hard-hat sticker, a standard card, a survey target)
 to establish a pixels-per-millimetre ratio, then converts pixel distances to real-world millimetres

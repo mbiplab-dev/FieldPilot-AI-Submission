@@ -63,7 +63,7 @@ by calling the next stage directly. This document is the map, and it names the h
 
 | # | Agent | Implemented by | Notes |
 |---|---|---|---|
-| **A1** | Vision Ingestion | `core/video_source.py`, `core/vision_engine.py`, `core/pipeline.py` | YOLO11m-pose + BoT-SORT, 17 keypoints, bounded drop-oldest frame queue. Two ingest paths (server camera, browser camera) share one pipeline. |
+| **A1** | Vision Ingestion | `core/video_source.py`, `core/vision_engine.py`, `core/pipeline.py`, `display/feeds.py` | YOLO11m-pose + BoT-SORT, 17 keypoints, bounded drop-oldest frame queue. Three ingest paths — the worker's phone, a server camera, and a browser camera — share one pipeline, so a phone frame is treated exactly like a `/dev/video0` frame. |
 | **A2** | Measurement | `compliance/calibration.py` | Reference object → px/mm → Euclidean distance and spec deviation. |
 | **A3** | Compliance | `rules/engine.py` + the `measurement` event path | Deviation beyond tolerance becomes a `measurement` event; the DB-configurable rules engine decides what compliance failure means (RFI, inspection, alert). |
 | **A4** | Hazard / Safety | `safety/fall.py`, `safety/ppe.py`, `safety/proximity.py`, `safety/attention.py`, `inspection/detector.py` | Falls, PPE (5 items), proximity, cognitive-attention state machine, structural damage. |
@@ -78,8 +78,8 @@ by calling the next stage directly. This document is the map, and it names the h
 
 | Graph edge | Reality |
 |---|---|
-| Glasses ↔ Phone (Bluetooth) | **Deferred** — no hardware. |
-| Phone → Cloud (WebRTC/RTMP) | **Deferred.** The browser-camera path (`display/server.py` `/ws/video`) stands in for the phone edge node: the operator's browser captures frames and ships JPEG over a WebSocket to the same pipeline. |
+| Glasses ↔ Phone (Bluetooth) | **Deferred** — no hardware. The phone's own camera stands in for the glasses. |
+| Phone → Cloud | **Built**, over a WebSocket rather than WebRTC/RTMP. The Flutter app streams raw NV21 camera planes to `display/server.py` `/ws/video` with its `worker_id`; the server decodes and runs the full pipeline. Nothing is inferred on the handset. Encoding on-device capped the rate near 1.4 fps (`takePicture()` is a full still capture), so the phone ships raw planes and the laptop converts them — ~10 fps at roughly 4.6 MB/s, fine on a LAN and too heavy for a thin site uplink. The manager watches each stream at `/workers/{id}/stream`. |
 | Cloud Ingestion Layer | `backend/app.py` `POST /events` + the event bus (`events/bus.py`, memory or Redis). Any producer — edge pipeline, browser, mobile, a worker's manual report — enters here. |
 | A8 → TTS Audio Alert → Phone | **Built, client-side.** The spoken sentence travels on the broadcast frame as `data.speech` (`alerts/speech.py`) and the phone speaks it via flutter_tts; the dashboard speaks its own phrasing via the Web Speech API. This is deliberate: `alerts/tts.py` renders onto the *server's* speakers, which is the wrong machine — and on a host without espeak-ng it cannot speak at all. On-device synthesis also needs no API key and survives a dead zone. What is still missing is routing that audio out through the *glasses'* open-ear speaker, which needs the hardware. |
 | Multi-Agent System boundary | Not a process boundary. All agents run in the backend service; the bus is the seam. |
@@ -102,7 +102,7 @@ already makes on alerts. Surfacing a training dashboard to a consumer of the sys
 ## Deferred, and why
 
 - **Glasses, Bluetooth, WebRTC/RTMP ingest** — needs the Ray-Ban Meta hardware.
-- **A5 voice intake (speech-to-text)** — needs the glasses microphone path. `plan.md` correction #1
+- **A5 voice intake (speech-to-text)** — needs the glasses microphone path. `plan.md` (docs/) correction #1
   already records that the source PRD misidentified Faster-Whisper as text-to-speech; Whisper's
   correct role here is *optional voice-command input*, and it remains unbuilt. The text+image
   question flow covers A5's reasoning half today.

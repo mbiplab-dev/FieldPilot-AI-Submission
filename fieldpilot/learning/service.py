@@ -4,7 +4,7 @@
 
 The gate is the point of the module: candidate weights are promoted **only** if mAP50 on the
 locked validation set did not regress. A regression is recorded as a completed run with
-`promoted: false`, not swept away — `plan.md` explicitly rejects "guaranteed improvement"
+`promoted: false`, not swept away — `docs/plan.md` explicitly rejects "guaranteed improvement"
 framing, so the loop reports what happened.
 
 Training is long and blocking, so a run executes on a worker thread and the API returns a

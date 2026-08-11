@@ -1,150 +1,76 @@
 # FieldPilot AI
 
-Real-time, multimodal edge-AI for construction-site safety, spatial compliance, and automated
-reporting. Display-less: all feedback is delivered through audio (earcons + speech) and haptics.
+Real-time, multimodal AI for construction-site safety, spatial compliance, and automated
+reporting.
 
-> ⚠️ **Advisory system.** FieldPilot assists workers; it is not an authoritative safety control and
-> must not be relied on as the sole means of hazard detection. See [`docs/`](./docs).
+A worker carries a phone. Its camera streams to a laptop that runs every model. When the system
+sees a hazard — a missing hard hat, a fall, someone too close to an excavator, rebar spacing out of
+tolerance — the worker **hears** it, in the second person, without taking their hands off the
+tools:
 
-See [`plan.md`](./plan.md) for the architecture and [`tracking.md`](./tracking.md) for build status.
+> *"Stop work. Rebar spacing is 40 millimetres above spec."*
 
-## Quick start with Make (recommended)
+The same hazard reaches the site manager as a different sentence, phrased for someone triaging many
+workers at once, alongside the live camera feed it came from.
 
-```bash
-make setup        # install everything (uv)
-make doctor       # check your environment
-make run-all      # start EVERYTHING: infra + backend :8100 + edge pipeline
-                  # Ctrl-C (or `make stop-all`) tears it all down cleanly
-```
+> ⚠️ **Advisory system.** FieldPilot assists workers. It is not an authoritative safety control and
+> must not be relied on as the sole means of hazard detection.
 
-| Target | What it does |
+## What it does
+
+**Sees.** Pose-based fall detection, PPE checks, proximity to heavy equipment, an
+attention/gaze state machine for hazards a worker has not noticed, and structural-defect
+inspection. Measurement against spec uses reference-object calibration, so a deviation is a number
+rather than an impression.
+
+**Decides.** Every detection becomes an event and travels one path — event → trigger engine →
+rules engine → notification → dashboard. A model never calls a dashboard directly. A local LLM
+sits in the middle as noise control, but it is explicitly *not* a safety authority: it can never
+silently suppress a high-severity hazard, because a small model was measured binning a
+0.97-confidence fall.
+
+**Speaks.** Alerts are spoken on the devices people actually carry — the worker's phone and the
+manager's browser — so speech survives a disconnected site and needs no server audio stack.
+
+**Files the paperwork.** A spec deviation auto-drafts an RFI, grounded in the site's own
+specification documents via retrieval. Citations come from the retrieved chunk's metadata, never
+from model output, so a clause number cannot be hallucinated.
+
+**Remembers.** Zone check-in and occupancy, per-zone risk ranking, worker questions answered by the
+LLM and then authoritatively by a manager, direct manager↔worker messaging with voice notes, and a
+feedback loop that only promotes retrained weights when they did not regress on a locked
+validation set.
+
+## The pieces
+
+| | |
 |---|---|
-| `make run-all` | One-command platform: infra → backend → edge (feed+bus) → Next.js dashboard |
-| `make stop-all` | Stop services + infra |
-| `make backend` | Event-driven backend only (`http://localhost:8100`, docs at `/docs`) |
-| `make edge` / `make edge-synthetic` | Edge safety loop on webcam / synthetic frames |
-| `make gui` | Live MJPEG dashboard on `http://localhost:8000` |
-| `make frontend` | Next.js site-manager dashboard on `http://localhost:3000` |
-| `make infra-up` / `infra-down` | PostgreSQL + Redis + Qdrant + Ollama |
-| `make test` / `make lint` | 74-test suite / ruff + eslint |
-| `make llm-pull` | Pull the llama3.2:3b model for alert verification |
-| `make validate` / `make bench` | 10-min stress run / latency harness |
-| `make help` | All targets |
+| **Worker app** (`worker_app/`) | Flutter. Streams the phone camera, speaks alerts aloud, zone check-in, photo questions, one-tap hazard reports, chat with voice notes |
+| **Backend** (`fieldpilot/`) | FastAPI on :8100. Auth, the event chain, alerts, RFIs, messaging |
+| **Vision edge** (`fieldpilot/display/`) | FastAPI on :8000. Frame ingest, the detector pipeline, per-worker camera relay |
+| **Dashboard** (`frontend/`) | Next.js on :3000. Live worker cameras, alerts with the AI's verdict, questions, messaging, zones, RFIs |
 
-## Quick start (Milestone 1 — offline edge safety loop)
+## Documentation
 
-Runs with **no cloud, no API keys, no internet**. Local espeak-ng provides the voice fallback.
+All of it is in [`docs/`](./docs) — start at [`docs/index.md`](./docs/index.md).
 
-```bash
-# 1. Create the pinned Python 3.12 environment (system Python 3.14 is too new for the ML stack)
-uv sync
+- **[Setup and running](./docs/setup.md)** — install, run the services, connect a phone
+- **[Make commands](./docs/commands.md)** — every target, and which ones are destructive
+- **[Architecture](./docs/architecture.md)** — the event chain and why it is inviolable
+- **[Pitch vs. code](./docs/pitch-vs-code.md)** — every claim marked built, built-differently, or
+  not built
 
-# 2. Run against your webcam (/dev/video0)
-uv run python -m fieldpilot.run --source webcam
+That last one is the honest accounting. Read it before believing anything impressive.
 
-# 3. Or against a video file
-uv run python -m fieldpilot.run --source file --file data/videos/sample.mp4
+## Status
 
-# 4. Repeatable 10-minute validation run (headless, exits 0 on success)
-uv run python -m fieldpilot.run --validate 10min
+Built and tested: hazard detection, the full event chain, spoken alerts on both clients, phone
+camera streaming with per-worker feeds, grounded RFI drafting, zone occupancy and risk, worker
+questions, manager↔worker messaging with voice, offline store-and-forward, and the no-regression
+learning gate.
 
-# 5. Latency harness (prints median detection→alert latency; target < 500 ms)
-uv run python -m fieldpilot.run --bench
-
-# 6. Tests
-uv run pytest tests -k "fall or attention"
-```
-
-The first run auto-downloads `yolov8n-pose.pt` into `models/`.
-
-## Event-driven backend (Phase 1–3, 8)
-
-AI models never call notification/dashboard APIs directly — they publish canonical
-events. The platform chain is:
-
-```
-Model → Event → Trigger Engine (dedup/merge/resolve) → Rules Engine → Notification → Dashboard
-```
-
-```bash
-# 1. (optional) start PostgreSQL + Redis + Qdrant + Ollama
-docker compose up -d          # without this, the backend runs on SQLite + in-memory bus
-
-# 2. start the backend service (bus + triggers + rules + REST) on :8100
-uv run python -m fieldpilot.run --backend
-
-# 3. ingest an event (any model / edge device)
-curl -X POST http://localhost:8100/events -H 'Content-Type: application/json' -d '{
-  "worker_id": "w-1", "camera_id": "cam-1", "zone": "zone-a",
-  "event_type": "ppe", "severity": "medium", "confidence": 0.92,
-  "payload": {"ppe_item": "helmet", "dedup_key": "helmet", "message": "no helmet"}
-}'
-
-# 4. query the deduplicated alert board, rules, worker timeline
-curl http://localhost:8100/alerts
-curl http://localhost:8100/rules
-curl http://localhost:8100/workers/w-1/timeline
-
-# 5. run the edge pipeline in event-driven mode (detections publish onto the bus)
-uv run python -m fieldpilot.run --source webcam --bus
-```
-
-The trigger engine collapses duplicate detections of the same issue within 45 s, merges
-repeats into one alert with a hit counter, tracks alerts (NEW → ACTIVE), auto-resolves
-when the issue disappears, and lets operators SUPPRESS noise. Rules are stored in the
-database and edited via REST — e.g. *no helmet AND in danger zone → critical alert*;
-*crack severity > 0.85 → immediate inspection*; *rebar deviation > 20 mm → generate RFI*.
-
-## Cameras: server-side or browser-side
-
-Two ingest paths run the *same* pipeline, so hazards from either reach the event bus identically:
-
-```bash
-# a camera attached to the server (or a file / synthetic frames)
-make edge                                    # reads /dev/video0
-
-# the camera attached to the operator's own browser — no server camera needed
-# open the dashboard's Camera page, or the zero-build fallback at:
-#   http://localhost:8000/camera
-```
-
-Browser capture needs a secure context: it works on `localhost`, and needs HTTPS anywhere else.
-
-## Detector models
-
-The registry ships several verified public PPE checkpoints. Each is pinned to a git revision **and**
-a SHA-256, is checksum-verified on download, and declares its licence:
-
-```bash
-make models                    # list the registry (downloaded / licence / capability)
-curl -X POST localhost:8100/models/select -H 'Content-Type: application/json' \
-     -d '{"model_key":"ppe_helmet_vest_n"}'
-```
-
-PPE checks cover helmet, vest, gloves, boots and goggles, with dataset label aliases normalised so
-differently-named checkpoints work unchanged. Selecting a **person-only** detector (e.g. `yolo26n`)
-automatically pauses PPE alerting — such a model cannot evidence a missing helmet, so raising one
-would be fabricated. Individual items can be switched off per site:
-
-```bash
-curl -X POST localhost:8100/config/tracked-items -H 'Content-Type: application/json' \
-     -d '{"item_name":"goggles","enabled":false}'
-```
-
-## Configuration
-
-Everything tunable lives in [`config.yaml`](./config.yaml). Any value can be overridden with an env
-var of the form `FIELDPILOT_<SECTION>__<KEY>` (double underscore denotes nesting), e.g.
-`FIELDPILOT_APP__PERSPECTIVE=BOTH`.
-
-Settings a site manager changes at runtime (tracked PPE items, confidence threshold, pose on/off,
-selected detector) are persisted and **override** the YAML defaults, so a restart does not revert
-the site's configuration. See `GET /config`.
-
-## Not yet built
-
-Deferred until the Ray-Ban hardware is available, and marked as not-started rather than stubbed:
-LiveKit/WebRTC ingest, LiteRT INT8 export, the IMU ego-perspective path, and the battery-drain
-harness. See [`tracking.md`](./tracking.md) for the current state of every milestone, and
-[`docs/branch-integration.md`](./docs/branch-integration.md) for what was ported from the `hrm`
-branch.
+Not built, and deliberately not stubbed: smart-glasses hardware and open-ear audio, Whisper voice
+intake, monocular depth, BLE indoor positioning, a graph database, 3D reconstruction, and the
+Procore/BIM and WhatsApp integrations. The impact figures in the pitch deck are projections that
+nothing in this repository measures. See
+[`docs/pitch-vs-code.md`](./docs/pitch-vs-code.md).

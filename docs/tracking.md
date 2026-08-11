@@ -7,7 +7,7 @@ Last updated: 2026-08-03
 ## Milestone 0 — Scaffold & deliverables ✅
 | # | Task | Status |
 |---|------|--------|
-| 0.1 | `plan.md` + `tracking.md` at project root | ✅ |
+| 0.1 | `plan.md` + `tracking.md` (now under `docs/`) | ✅ |
 | 0.2 | `uv` project, Python 3.12 venv, `pyproject.toml` | ✅ |
 | 0.3 | `config.yaml` — all tunable thresholds | ✅ |
 | 0.4 | `.env.example`, `.gitignore`, `README.md` | ✅ |

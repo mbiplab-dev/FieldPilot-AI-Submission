@@ -15,7 +15,7 @@ Legend: **✅ built** · **◐ built differently** · **⭕ not built**
 
 | Claim | Status | Reality |
 |---|---|---|
-| "Meta smart glasses stream what the worker sees" | ⭕ | No glasses SDK integration. The browser-camera path (`display/server.py` `/ws/video`) stands in as the capture source. |
+| "Meta smart glasses stream what the worker sees" | ◐ | No glasses SDK. The worker's **phone camera** is the capture source and genuinely streams to the server; what is missing is the glasses themselves, not the pipeline behind them. |
 | "10 agents do the work" | ✅ | All ten responsibilities exist as modules. Not ten processes with an agent framework — see [agents.md](agents.md) for the module-by-module map and why. |
 | "auto-draft the RFI with the spec quoted" | ✅ | `reasoning/rfi.py`. Citations come from retrieved chunk metadata, never from LLM output, so a clause number cannot be hallucinated. |
 | **"The worker hears the verdict … 'Stop work — rebar spacing 40mm above spec'"** | ✅ | Implemented, and verified end to end. The exact sentence is what the worker's phone speaks. See *Spoken alerts* below. |
@@ -68,7 +68,7 @@ open-ear glasses audio is a Bluetooth pairing job that needs the hardware.
 | Llama.cpp 3B / Llama-3 8B | ◐ | **llama3.2:3b via Ollama**. |
 | LLaVA / Qwen-VL | ◐ | Config supports a vision model (`llm.vision`), default off. The gate is **noise control, not a safety authority**: text-only it may suppress nothing, and even with vision it cannot suppress above a severity ceiling — a 3B model was measured binning a 0.97-confidence fall. |
 | Depth Anything V2 (monocular depth) | ⭕ | Measurement is **reference-object px/mm calibration** (`compliance/calibration.py`), not a depth network. The deck's `Z = fB/d` formula is stereo disparity and does not describe what runs. |
-| WebRTC / RTMP streaming | ⭕ | JPEG frames over a WebSocket. |
+| WebRTC / RTMP streaming | ◐ | Not WebRTC/RTMP, but the phone→server video path is **built**: raw NV21 camera planes over a WebSocket, decoded server-side, ~10 fps. The manager watches each worker as MJPEG. |
 | NeRF / Gaussian Splatting | ⭕ | Not built. No 3D reconstruction anywhere. |
 | Whisper (speech-to-text) | ⭕ | Not built. The worker asks questions by **text + photo**, which covers Agent 5's reasoning half; voice intake is deferred with the microphone. |
 | Neo4j knowledge graph | ⭕ | Project memory is the relational store (`storage/docstore.py` over SQLite/Postgres). No graph database. |
