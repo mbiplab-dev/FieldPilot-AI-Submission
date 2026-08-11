@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from fieldpilot.backend.app import create_app
 from fieldpilot.core.config import Config
+from tests.conftest import MANAGER, login
 
 
 @pytest.fixture()
@@ -60,7 +61,8 @@ def _wait_for_alerts(client, count=1, budget=6.0):
 
 
 def test_config_exposes_boot_defaults_from_yaml(client):
-    body = client.get("/config").json()
+    _, manager_h = login(client, MANAGER)
+    body = client.get("/config", headers=manager_h).json()
     assert body["tracked_items"] == {
         "helmet": True, "vest": True, "gloves": False, "boots": False, "goggles": False,
     }
@@ -71,42 +73,58 @@ def test_config_exposes_boot_defaults_from_yaml(client):
     assert body["ppe_weights"]["enabled"] is False
 
 
+def test_config_requires_a_site_manager(client):
+    _, worker_h = login(client, {"username": "worker1", "password": "worker123"})
+    assert client.get("/config", headers=worker_h).status_code == 403
+    assert client.get("/config").status_code == 401
+
+
 def test_tracked_item_toggle_persists_and_is_reflected(client):
-    r = client.post("/config/tracked-items", json={"item_name": "gloves", "enabled": True})
+    _, manager_h = login(client, MANAGER)
+    r = client.post("/config/tracked-items", json={"item_name": "gloves", "enabled": True},
+                    headers=manager_h)
     assert r.status_code == 200
     assert r.json()["tracked_items"]["gloves"] is True
-    assert client.get("/config").json()["tracked_items"]["gloves"] is True
+    assert client.get("/config", headers=manager_h).json()["tracked_items"]["gloves"] is True
 
-    client.post("/config/tracked-items", json={"item_name": "helmet", "enabled": False})
-    items = client.get("/config").json()["tracked_items"]
+    client.post("/config/tracked-items", json={"item_name": "helmet", "enabled": False},
+               headers=manager_h)
+    items = client.get("/config", headers=manager_h).json()["tracked_items"]
     assert items["helmet"] is False and items["gloves"] is True, "toggles are independent"
 
 
 def test_unknown_tracked_item_is_rejected(client):
-    r = client.post("/config/tracked-items", json={"item_name": "jetpack", "enabled": True})
+    _, manager_h = login(client, MANAGER)
+    r = client.post("/config/tracked-items", json={"item_name": "jetpack", "enabled": True},
+                    headers=manager_h)
     assert r.status_code == 400
     assert "jetpack" in r.json()["detail"]
 
 
 def test_monitoring_settings_validate_and_persist(client):
+    _, manager_h = login(client, MANAGER)
     r = client.post("/config/monitoring", json={"confidence_threshold": 0.55,
-                                                "pose_enabled": False})
+                                                "pose_enabled": False}, headers=manager_h)
     assert r.status_code == 200
     assert r.json()["confidence_threshold"] == 0.55
     assert r.json()["pose_enabled"] is False
-    cfg = client.get("/config").json()
+    cfg = client.get("/config", headers=manager_h).json()
     assert cfg["confidence_threshold"] == 0.55 and cfg["pose_enabled"] is False
 
 
 @pytest.mark.parametrize("bad", [0.05, 0.99, -1.0])
 def test_confidence_threshold_outside_the_usable_band_is_rejected(client, bad):
-    assert client.post("/config/monitoring", json={"confidence_threshold": bad}).status_code == 400
+    _, manager_h = login(client, MANAGER)
+    assert client.post("/config/monitoring", json={"confidence_threshold": bad},
+                       headers=manager_h).status_code == 400
 
 
 def test_partial_monitoring_update_leaves_the_other_field_alone(client):
-    client.post("/config/monitoring", json={"confidence_threshold": 0.6, "pose_enabled": False})
-    client.post("/config/monitoring", json={"confidence_threshold": 0.7})
-    cfg = client.get("/config").json()
+    _, manager_h = login(client, MANAGER)
+    client.post("/config/monitoring", json={"confidence_threshold": 0.6, "pose_enabled": False},
+               headers=manager_h)
+    client.post("/config/monitoring", json={"confidence_threshold": 0.7}, headers=manager_h)
+    cfg = client.get("/config", headers=manager_h).json()
     assert cfg["confidence_threshold"] == 0.7
     assert cfg["pose_enabled"] is False, "pose_enabled must not be reset by a partial update"
 
@@ -125,13 +143,15 @@ def test_models_endpoint_lists_the_registry(client):
 
 
 def test_selecting_an_unknown_model_is_rejected(client):
-    assert client.post("/models/select",
-                       json={"model_key": "not-a-model"}).status_code == 400
+    _, manager_h = login(client, MANAGER)
+    assert client.post("/models/select", json={"model_key": "not-a-model"},
+                       headers=manager_h).status_code == 400
 
 
 def test_model_choice_is_recorded_without_downloading(client):
+    _, manager_h = login(client, MANAGER)
     r = client.post("/models/select", json={"model_key": "ppe_construction_n",
-                                            "download": False})
+                                            "download": False}, headers=manager_h)
     assert r.status_code == 200
     assert r.json()["model_key"] == "ppe_construction_n"
     assert r.json()["weights"] is None, "download=False must not fetch anything"
@@ -158,7 +178,9 @@ def test_select_with_download_awaits_the_registry_and_returns_a_real_path(client
 
     monkeypatch.setattr("fieldpilot.models_registry.ensure_weights", _ensure)
 
-    r = client.post("/models/select", json={"model_key": "ppe_construction_n", "download": True})
+    _, manager_h = login(client, MANAGER)
+    r = client.post("/models/select", json={"model_key": "ppe_construction_n", "download": True},
+                    headers=manager_h)
     assert r.status_code == 200, r.text
     assert calls == [("ppe_construction_n", str(tmp_path / "models"))]
     assert r.json()["weights"] == str(fake)
@@ -172,7 +194,9 @@ def test_select_surfaces_a_download_failure_instead_of_a_500(client, monkeypatch
         raise ModelRegistryError("checksum verification failed")
 
     monkeypatch.setattr("fieldpilot.models_registry.ensure_weights", _boom)
-    r = client.post("/models/select", json={"model_key": "ppe_vyra_m", "download": True})
+    _, manager_h = login(client, MANAGER)
+    r = client.post("/models/select", json={"model_key": "ppe_vyra_m", "download": True},
+                    headers=manager_h)
     assert r.status_code == 400
     assert "checksum" in r.json()["detail"]
 
@@ -205,13 +229,14 @@ def test_stats_route_is_not_shadowed_by_the_alert_id_route(client):
 
 
 def test_acknowledging_an_alert_resolves_it_and_updates_stats(client):
+    _, manager_h = login(client, MANAGER)
     client.post("/events", json=_ppe_event(dedup="ack-1"))
     alerts = _wait_for_alerts(client, 1)
     alert_id = alerts[0]["alert_id"]
     assert alerts[0]["state"] in ("NEW", "ACTIVE")
 
     before = client.get("/alerts/stats").json()["outstanding"]
-    r = client.post(f"/alerts/{alert_id}/acknowledge")
+    r = client.post(f"/alerts/{alert_id}/acknowledge", headers=manager_h)
     assert r.status_code == 200
 
     assert client.get(f"/alerts/{alert_id}").json()["state"] == "RESOLVED"

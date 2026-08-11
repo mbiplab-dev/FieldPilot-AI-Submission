@@ -138,6 +138,11 @@ auth:
   # table is empty, and the service logs a warning about them — change them before any real use.
   token_ttl_s: 43200                   # 12 h session lifetime
   seed_demo_users: true                # set false to require explicit account creation
+  # Shared secret POST /events checks for. Edge devices and models publish there directly and
+  # hold no user session, so a login token does not apply to them the way it does to every other
+  # route. Left null, ingest stays open to anyone who can reach this port (today's behaviour,
+  # logged loudly at startup); set it once the edge side is wired to send it as a bearer token.
+  ingest_token: null
 
 # --- Event-driven platform (Model → Event → Rules → Notification → Dashboard) --------------
 events:

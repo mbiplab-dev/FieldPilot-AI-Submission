@@ -21,6 +21,7 @@ Exposes the event-driven platform over REST:
 
 from __future__ import annotations
 
+import hmac
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -53,6 +54,7 @@ from fieldpilot.auth import (
     Forbidden,
     InvalidCredentials,
     NotAuthenticated,
+    bearer_token,
 )
 from fieldpilot.auth.service import require_role, require_site_manager, require_user
 from fieldpilot.backend.service import Orchestrator
@@ -341,6 +343,18 @@ def create_app(cfg: Config) -> FastAPI:
         if not await blueprints.start():
             log.warning("blueprint index unavailable — RFIs will be filed ungrounded")
         triggers.start_sweeper(interval_s=float(cfg.get("triggers.sweep_interval_s", 5)))
+        if not ingest_token:
+            # POST /events is how edge devices and models publish — they hold no user session,
+            # so it cannot sit behind require_user like the rest of the REST surface. Without a
+            # shared secret it is wide open: anyone who can reach this port can inject fabricated
+            # hazard events (or silence real ones by flooding a dedup key). Set auth.ingest_token
+            # to close this; left unset only because the edge does not yet send one (see app.py's
+            # `require_ingest_token`).
+            log.warning(
+                "auth.ingest_token is not set — POST /events accepts events from anyone who can "
+                "reach this port, with no credentials. Set auth.ingest_token to require edge "
+                "devices to present a shared secret."
+            )
         log.info("FieldPilot backend up — bus=%s store=%s", bus_backend, backend)
         try:
             yield
@@ -396,6 +410,25 @@ def create_app(cfg: Config) -> FastAPI:
     manager_only = require_site_manager(auth)
     worker_only = require_role(auth, "worker")
 
+    # POST /events is the one route a user session cannot gate: it is the ingest path edge
+    # devices and models push through (fieldpilot/offline/forwarder.py, fieldpilot/events/bridge
+    # publish onto the in-process bus and never touch this HTTP route directly, but the store-
+    # and-forward client does). Those clients hold no login, so `require_user` does not apply.
+    # `auth.ingest_token`, when set, is a shared secret they present as a bearer token instead;
+    # left unset, ingest stays exactly as open as it is today rather than breaking silently.
+    ingest_token = cfg.get("auth.ingest_token") or None
+
+    async def require_ingest_token(
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> None:
+        if not ingest_token:
+            return
+        presented = bearer_token(authorization)
+        # hmac.compare_digest: this is a shared secret, not a per-user session lookup, so the
+        # constant-time comparison has to happen here rather than inside AuthService.
+        if not presented or not hmac.compare_digest(presented, str(ingest_token)):
+            raise HTTPException(401, "missing or invalid ingest token")
+
     _IMAGE_TYPES = (".jpg", ".jpeg", ".png", ".webp")
     #: Container formats a phone or browser realistically records a voice note in.
     _AUDIO_TYPES = (".m4a", ".aac", ".mp4", ".mp3", ".ogg", ".opus", ".wav", ".webm", ".3gp")
@@ -434,8 +467,6 @@ def create_app(cfg: Config) -> FastAPI:
 
     @app.post("/auth/logout")
     async def logout(authorization: str | None = Header(default=None, alias="Authorization")):
-        from fieldpilot.auth import bearer_token
-
         token = bearer_token(authorization)
         return {"ok": bool(token) and await auth.logout(token)}
 
@@ -779,7 +810,9 @@ def create_app(cfg: Config) -> FastAPI:
     # ---------------------------------------------------------------- events
 
     @app.post("/events", status_code=202)
-    async def ingest_event(event: Event) -> dict[str, str]:
+    async def ingest_event(
+        event: Event, _: None = Depends(require_ingest_token)
+    ) -> dict[str, str]:
         """Models/edge devices push canonical events here → straight onto the bus."""
 
         await publish_event(bus, event)
@@ -868,19 +901,19 @@ def create_app(cfg: Config) -> FastAPI:
         return {"alert": updated}
 
     @app.post("/alerts/{alert_id}/resolve")
-    async def resolve_alert(alert_id: str):
+    async def resolve_alert(alert_id: str, _: dict[str, Any] = Depends(manager_only)):
         return await _mutate(alert_id, "resolve")
 
     @app.post("/alerts/{alert_id}/suppress")
-    async def suppress_alert(alert_id: str):
+    async def suppress_alert(alert_id: str, _: dict[str, Any] = Depends(manager_only)):
         return await _mutate(alert_id, "suppress")
 
     @app.post("/alerts/{alert_id}/unsuppress")
-    async def unsuppress_alert(alert_id: str):
+    async def unsuppress_alert(alert_id: str, _: dict[str, Any] = Depends(manager_only)):
         return await _mutate(alert_id, "unsuppress")
 
     @app.post("/alerts/{alert_id}/acknowledge")
-    async def acknowledge_alert(alert_id: str):
+    async def acknowledge_alert(alert_id: str, _: dict[str, Any] = Depends(manager_only)):
         """Operator has seen and dealt with it.
 
         `hrm` modelled this as a boolean column. Here the trigger engine already owns an alert
@@ -897,7 +930,7 @@ def create_app(cfg: Config) -> FastAPI:
         return {"rules": [r.to_dict() for r in rules_engine.list_rules()]}
 
     @app.post("/rules", status_code=201)
-    async def create_rule(rule_in: RuleIn):
+    async def create_rule(rule_in: RuleIn, _: dict[str, Any] = Depends(manager_only)):
         rule = Rule.from_dict({**rule_in.model_dump(), "rule_id": uuid.uuid4().hex})
         await store.put_rule(rule.to_dict())
         rules_engine.add_rule(rule)
@@ -911,7 +944,9 @@ def create_app(cfg: Config) -> FastAPI:
         return rule.to_dict()
 
     @app.put("/rules/{rule_id}")
-    async def update_rule(rule_id: str, rule_in: RuleIn):
+    async def update_rule(
+        rule_id: str, rule_in: RuleIn, _: dict[str, Any] = Depends(manager_only)
+    ):
         if rules_engine.get_rule(rule_id) is None:
             raise HTTPException(404, "rule not found")
         rule = Rule.from_dict({**rule_in.model_dump(), "rule_id": rule_id})
@@ -920,7 +955,7 @@ def create_app(cfg: Config) -> FastAPI:
         return rule.to_dict()
 
     @app.delete("/rules/{rule_id}")
-    async def delete_rule(rule_id: str):
+    async def delete_rule(rule_id: str, _: dict[str, Any] = Depends(manager_only)):
         if not rules_engine.remove_rule(rule_id):
             raise HTTPException(404, "rule not found")
         await store.delete_rule(rule_id)
@@ -956,12 +991,15 @@ def create_app(cfg: Config) -> FastAPI:
             await hub.publish("rfi", updated, zone=updated.get("zone"))
         return updated or {}
 
+    # RFI review and inspection sign-off are supervisor decisions in the same sense alert
+    # resolution is: a `ReviewIn.reviewer` defaults to "supervisor" precisely because this is not
+    # something the platform lets the person being inspected also close out.
     @app.post("/rfis/{rfi_id}/approve")
-    async def approve_rfi(rfi_id: str, body: ReviewIn):
+    async def approve_rfi(rfi_id: str, body: ReviewIn, _: dict[str, Any] = Depends(manager_only)):
         return await _review_rfi(rfi_id, "approved", body)
 
     @app.post("/rfis/{rfi_id}/reject")
-    async def reject_rfi(rfi_id: str, body: ReviewIn):
+    async def reject_rfi(rfi_id: str, body: ReviewIn, _: dict[str, Any] = Depends(manager_only)):
         return await _review_rfi(rfi_id, "rejected", body)
 
     @app.get("/inspections")
@@ -971,7 +1009,9 @@ def create_app(cfg: Config) -> FastAPI:
         return {"inspections": await store.list_inspections(status=status, limit=limit)}
 
     @app.post("/inspections/{inspection_id}/complete")
-    async def complete_inspection(inspection_id: str, body: ReviewIn):
+    async def complete_inspection(
+        inspection_id: str, body: ReviewIn, _: dict[str, Any] = Depends(manager_only)
+    ):
         if await store.get_inspection(inspection_id) is None:
             raise HTTPException(404, "inspection not found")
         updated = await store.update_inspection(inspection_id, {
@@ -984,8 +1024,13 @@ def create_app(cfg: Config) -> FastAPI:
     # ---------------------------------------------------------------- site config & models
 
     @app.get("/config")
-    async def site_config():
-        """Everything an operator can change at runtime, plus what it currently resolves to."""
+    async def site_config(_: dict[str, Any] = Depends(manager_only)):
+        """Everything an operator can change at runtime, plus what it currently resolves to.
+
+        Manager-only for the whole family, including this read: it names exactly which PPE
+        checks and confidence thresholds are live, which is the same "how is detection tuned"
+        information the writes below control — not something worth exposing more broadly.
+        """
 
         return {
             **settings.all(),
@@ -996,7 +1041,9 @@ def create_app(cfg: Config) -> FastAPI:
         }
 
     @app.post("/config/tracked-items")
-    async def set_tracked_item(body: TrackedItemIn):
+    async def set_tracked_item(
+        body: TrackedItemIn, _: dict[str, Any] = Depends(manager_only)
+    ):
         """Enable/disable one PPE check. Pushed to the edge over the bus."""
 
         try:
@@ -1006,7 +1053,7 @@ def create_app(cfg: Config) -> FastAPI:
         return {"ok": True, "tracked_items": items}
 
     @app.post("/config/monitoring")
-    async def set_monitoring(body: MonitoringIn):
+    async def set_monitoring(body: MonitoringIn, _: dict[str, Any] = Depends(manager_only)):
         try:
             return {"ok": True, **await settings.set_monitoring(
                 confidence_threshold=body.confidence_threshold,
@@ -1029,7 +1076,9 @@ def create_app(cfg: Config) -> FastAPI:
         }
 
     @app.post("/models/select")
-    async def select_detector_model(body: ModelSelectIn):
+    async def select_detector_model(
+        body: ModelSelectIn, _: dict[str, Any] = Depends(manager_only)
+    ):
         """Choose a detector, fetching + checksum-verifying its weights if needed.
 
         The edge owns the actual model swap; this records the choice, makes sure the verified
@@ -1066,7 +1115,7 @@ def create_app(cfg: Config) -> FastAPI:
         return {"zones": await zones.list(project_id=project_id, active_only=active_only)}
 
     @app.post("/zones", status_code=201)
-    async def create_zone(body: ZoneIn):
+    async def create_zone(body: ZoneIn, _: dict[str, Any] = Depends(manager_only)):
         try:
             zone = await zones.create(body.model_dump(exclude_none=True))
         except ValueError as exc:
@@ -1082,7 +1131,9 @@ def create_app(cfg: Config) -> FastAPI:
         return zone
 
     @app.put("/zones/{zone_id}")
-    async def update_zone(zone_id: str, body: ZoneIn):
+    async def update_zone(
+        zone_id: str, body: ZoneIn, _: dict[str, Any] = Depends(manager_only)
+    ):
         try:
             zone = await zones.update(zone_id, body.model_dump(exclude_none=True))
         except ValueError as exc:
@@ -1093,7 +1144,7 @@ def create_app(cfg: Config) -> FastAPI:
         return zone
 
     @app.delete("/zones/{zone_id}")
-    async def delete_zone(zone_id: str):
+    async def delete_zone(zone_id: str, _: dict[str, Any] = Depends(manager_only)):
         if not await zones.delete(zone_id):
             raise HTTPException(404, "zone not found")
         return {"deleted": True, "zone_id": zone_id}
@@ -1101,7 +1152,9 @@ def create_app(cfg: Config) -> FastAPI:
     # ---------------------------------------------------------------- feedback
 
     @app.post("/alerts/{alert_id}/feedback")
-    async def submit_feedback(alert_id: str, body: FeedbackIn):
+    async def submit_feedback(
+        alert_id: str, body: FeedbackIn, _: dict[str, Any] = Depends(manager_only)
+    ):
         """Supervisor approves/rejects an alert — the label the learning loop trains on."""
 
         alert = await store.get_alert(alert_id)
@@ -1138,7 +1191,7 @@ def create_app(cfg: Config) -> FastAPI:
     # ---------------------------------------------------------------- learning
 
     @app.post("/learning/train")
-    async def start_training(body: TrainIn):
+    async def start_training(body: TrainIn, _: dict[str, Any] = Depends(manager_only)):
         try:
             return await learning.start_run(
                 epochs=body.epochs, base_weights=body.base_weights
@@ -1184,7 +1237,7 @@ def create_app(cfg: Config) -> FastAPI:
         }
 
     @app.post("/blueprints/ingest")
-    async def ingest_blueprints(body: IngestIn):
+    async def ingest_blueprints(body: IngestIn, _: dict[str, Any] = Depends(manager_only)):
         if not blueprints.available and not await blueprints.start():
             raise HTTPException(503, "Qdrant unavailable — cannot ingest")
         report = await ingest_directory(blueprints, blueprints_dir, replace=body.replace)
@@ -1276,7 +1329,9 @@ def create_app(cfg: Config) -> FastAPI:
     # ---------------------------------------------------------------- control
 
     @app.post("/control/inspection")
-    async def set_inspection(body: InspectionControlIn):
+    async def set_inspection(
+        body: InspectionControlIn, _: dict[str, Any] = Depends(manager_only)
+    ):
         """Toggle inspection mode on the edge, via the bus (control.inspection)."""
 
         state = {"enabled": body.enabled}

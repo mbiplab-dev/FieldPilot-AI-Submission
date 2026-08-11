@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from fieldpilot.backend.app import create_app
 from fieldpilot.core.config import Config
+from tests.conftest import MANAGER, login
 
 
 @pytest.fixture()
@@ -61,19 +62,20 @@ def test_event_ingest_creates_single_deduped_alert(client):
 
 
 def test_alert_resolve_and_suppress_flow(client):
+    _, manager_h = login(client, MANAGER)
     client.post("/events", json=_ppe_payload())
     time.sleep(0.2)
     alert = client.get("/alerts").json()["alerts"][0]
     aid = alert["alert_id"]
 
-    r = client.post(f"/alerts/{aid}/suppress")
+    r = client.post(f"/alerts/{aid}/suppress", headers=manager_h)
     assert r.json()["alert"]["state"] == "SUPPRESSED"
-    r = client.post(f"/alerts/{aid}/unsuppress")
+    r = client.post(f"/alerts/{aid}/unsuppress", headers=manager_h)
     assert r.json()["alert"]["state"] == "ACTIVE"
-    r = client.post(f"/alerts/{aid}/resolve")
+    r = client.post(f"/alerts/{aid}/resolve", headers=manager_h)
     assert r.json()["alert"]["state"] == "RESOLVED"
 
-    assert client.post("/alerts/does-not-exist/resolve").status_code == 404
+    assert client.post("/alerts/does-not-exist/resolve", headers=manager_h).status_code == 404
 
 
 def test_alert_filters(client):
@@ -87,22 +89,23 @@ def test_alert_filters(client):
 
 
 def test_rules_crud(client):
+    _, manager_h = login(client, MANAGER)
     rule = {
         "name": "test-rule", "priority": 50, "event_types": ["fall"],
         "conditions": [{"field": "event.severity", "op": "eq", "value": "high"}],
         "action": {"type": "notify", "message": "fall!"}, "cooldown_s": 60,
     }
-    created = client.post("/rules", json=rule)
+    created = client.post("/rules", json=rule, headers=manager_h)
     assert created.status_code == 201
     rid = created.json()["rule_id"]
 
     got = client.get(f"/rules/{rid}")
     assert got.json()["name"] == "test-rule"
 
-    updated = client.put(f"/rules/{rid}", json={**rule, "enabled": False})
+    updated = client.put(f"/rules/{rid}", json={**rule, "enabled": False}, headers=manager_h)
     assert updated.json()["enabled"] is False
 
-    assert client.delete(f"/rules/{rid}").json()["deleted"] == rid
+    assert client.delete(f"/rules/{rid}", headers=manager_h).json()["deleted"] == rid
     assert client.get(f"/rules/{rid}").status_code == 404
 
 
@@ -129,9 +132,10 @@ def test_notifications_endpoint(client):
 
 
 def test_inspection_control_endpoint(client):
+    _, manager_h = login(client, MANAGER)
     assert client.get("/control/inspection").json()["enabled"] is False
-    r = client.post("/control/inspection", json={"enabled": True})
+    r = client.post("/control/inspection", json={"enabled": True}, headers=manager_h)
     assert r.json()["enabled"] is True
     assert client.get("/control/inspection").json()["enabled"] is True
-    client.post("/control/inspection", json={"enabled": False})
+    client.post("/control/inspection", json={"enabled": False}, headers=manager_h)
     assert client.get("/control/inspection").json()["enabled"] is False
