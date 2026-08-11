@@ -825,12 +825,18 @@ def create_app(cfg: Config) -> FastAPI:
         zone: str | None = None,
         since: float | None = None,
         limit: int = Query(default=200, le=1000),
+        user: dict[str, Any] = Depends(any_user),
     ):
+        # I4: a worker filtering by worker_id must be filtering for themself — otherwise this is
+        # exactly how a colleague's raw event history (and whatever a hazard event's payload
+        # carries) would leak. `/me/*` exists for a worker's own view; this is the shared board.
+        if user.get("role") == "worker" and _worker_id(user) != worker_id:
+            raise HTTPException(403, "you can only view your own events")
         return {"events": await events_repo.list_events(
             event_type=event_type, worker_id=worker_id, zone=zone, since=since, limit=limit)}
 
     @app.get("/events/stats")
-    async def event_stats(since: float | None = None):
+    async def event_stats(since: float | None = None, _: dict[str, Any] = Depends(any_user)):
         return {"counts_by_type": await events_repo.count_by_type(since)}
 
     # ---------------------------------------------------------------- alerts
@@ -844,13 +850,19 @@ def create_app(cfg: Config) -> FastAPI:
         event_type: str | None = None,
         since: float | None = None,
         limit: int = Query(default=200, le=1000),
+        user: dict[str, Any] = Depends(any_user),
     ):
+        # I4: same reasoning as /events above — a worker may only ask for their own worker_id,
+        # never a colleague's alert history. Their own view without the filter lives at
+        # /me/alerts.
+        if user.get("role") == "worker" and _worker_id(user) != worker_id:
+            raise HTTPException(403, "you can only view your own alerts")
         return {"alerts": await store.list_alerts(
             state=state, severity=severity, worker_id=worker_id, zone=zone,
             event_type=event_type, since=since, limit=limit)}
 
     @app.get("/alerts/stats")
-    async def alert_stats():
+    async def alert_stats(_: dict[str, Any] = Depends(any_user)):
         """Board summary: totals, today, outstanding, and a per-item breakdown.
 
         `hrm` surfaced exactly this on its dashboard and it is the shape a site manager wants.
@@ -881,7 +893,7 @@ def create_app(cfg: Config) -> FastAPI:
         }
 
     @app.get("/alerts/{alert_id}")
-    async def get_alert(alert_id: str):
+    async def get_alert(alert_id: str, _: dict[str, Any] = Depends(any_user)):
         alert = await store.get_alert(alert_id)
         if alert is None:
             raise HTTPException(404, "alert not found")
@@ -926,7 +938,7 @@ def create_app(cfg: Config) -> FastAPI:
     # ---------------------------------------------------------------- rules
 
     @app.get("/rules")
-    async def list_rules():
+    async def list_rules(_: dict[str, Any] = Depends(any_user)):
         return {"rules": [r.to_dict() for r in rules_engine.list_rules()]}
 
     @app.post("/rules", status_code=201)
@@ -937,7 +949,7 @@ def create_app(cfg: Config) -> FastAPI:
         return rule.to_dict()
 
     @app.get("/rules/{rule_id}")
-    async def get_rule(rule_id: str):
+    async def get_rule(rule_id: str, _: dict[str, Any] = Depends(any_user)):
         rule = rules_engine.get_rule(rule_id)
         if rule is None:
             raise HTTPException(404, "rule not found")
@@ -964,17 +976,20 @@ def create_app(cfg: Config) -> FastAPI:
     # ---------------------------------------------------------------- notifications / rfis / inspections
 
     @app.get("/notifications")
-    async def list_notifications(limit: int = Query(default=200, le=1000)):
+    async def list_notifications(
+        limit: int = Query(default=200, le=1000), _: dict[str, Any] = Depends(any_user)
+    ):
         return {"notifications": await store.list_notifications(limit=limit)}
 
     @app.get("/rfis")
     async def list_rfis(
-        status: str | None = None, limit: int = Query(default=200, le=1000)
+        status: str | None = None, limit: int = Query(default=200, le=1000),
+        _: dict[str, Any] = Depends(any_user),
     ):
         return {"rfis": await store.list_rfis(status=status, limit=limit)}
 
     @app.get("/rfis/{rfi_id}")
-    async def get_rfi(rfi_id: str):
+    async def get_rfi(rfi_id: str, _: dict[str, Any] = Depends(any_user)):
         rfi = await store.get_rfi(rfi_id)
         if rfi is None:
             raise HTTPException(404, "RFI not found")
@@ -1004,7 +1019,8 @@ def create_app(cfg: Config) -> FastAPI:
 
     @app.get("/inspections")
     async def list_inspections(
-        status: str | None = None, limit: int = Query(default=200, le=1000)
+        status: str | None = None, limit: int = Query(default=200, le=1000),
+        _: dict[str, Any] = Depends(any_user),
     ):
         return {"inspections": await store.list_inspections(status=status, limit=limit)}
 
@@ -1063,7 +1079,7 @@ def create_app(cfg: Config) -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
 
     @app.get("/models")
-    async def list_detector_models():
+    async def list_detector_models(_: dict[str, Any] = Depends(any_user)):
         """The detector registry: what is available, downloaded, and licensed how."""
 
         try:
@@ -1111,7 +1127,10 @@ def create_app(cfg: Config) -> FastAPI:
     # ---------------------------------------------------------------- zones
 
     @app.get("/zones")
-    async def list_zones(project_id: str | None = None, active_only: bool = False):
+    async def list_zones(
+        project_id: str | None = None, active_only: bool = False,
+        _: dict[str, Any] = Depends(any_user),
+    ):
         return {"zones": await zones.list(project_id=project_id, active_only=active_only)}
 
     @app.post("/zones", status_code=201)
@@ -1124,7 +1143,7 @@ def create_app(cfg: Config) -> FastAPI:
         return zone
 
     @app.get("/zones/{zone_id}")
-    async def get_zone(zone_id: str):
+    async def get_zone(zone_id: str, _: dict[str, Any] = Depends(any_user)):
         zone = await zones.get(zone_id)
         if zone is None:
             raise HTTPException(404, "zone not found")
@@ -1179,13 +1198,14 @@ def create_app(cfg: Config) -> FastAPI:
         alert_id: str | None = None,
         unconsumed_only: bool = False,
         limit: int = Query(default=200, le=1000),
+        _: dict[str, Any] = Depends(any_user),
     ):
         return {"feedback": await feedback.list(
             decision=decision, event_type=event_type, alert_id=alert_id,
             unconsumed_only=unconsumed_only, limit=limit)}
 
     @app.get("/feedback/stats")
-    async def feedback_stats():
+    async def feedback_stats(_: dict[str, Any] = Depends(any_user)):
         return await feedback.stats()
 
     # ---------------------------------------------------------------- learning
@@ -1200,15 +1220,17 @@ def create_app(cfg: Config) -> FastAPI:
             raise HTTPException(409, str(exc)) from exc
 
     @app.get("/learning/runs")
-    async def list_learning_runs(limit: int = Query(default=50, le=500)):
+    async def list_learning_runs(
+        limit: int = Query(default=50, le=500), _: dict[str, Any] = Depends(any_user)
+    ):
         return {"runs": await learning.list_runs(limit=limit)}
 
     @app.get("/learning/latest")
-    async def latest_learning_run():
+    async def latest_learning_run(_: dict[str, Any] = Depends(any_user)):
         return await learning.latest_delta()
 
     @app.get("/learning/runs/{run_id}")
-    async def get_learning_run(run_id: str):
+    async def get_learning_run(run_id: str, _: dict[str, Any] = Depends(any_user)):
         run = await learning.get_run(run_id)
         if run is None:
             raise HTTPException(404, "run not found")
@@ -1217,7 +1239,7 @@ def create_app(cfg: Config) -> FastAPI:
     # ---------------------------------------------------------------- blueprints / RAG
 
     @app.get("/blueprints")
-    async def blueprint_status():
+    async def blueprint_status(_: dict[str, Any] = Depends(any_user)):
         docs_found = []
         root = Path(blueprints_dir)
         if root.is_dir():
@@ -1244,7 +1266,7 @@ def create_app(cfg: Config) -> FastAPI:
         return report.to_dict()
 
     @app.post("/blueprints/search")
-    async def search_blueprints(body: SearchIn):
+    async def search_blueprints(body: SearchIn, _: dict[str, Any] = Depends(any_user)):
         chunks = await blueprints.search(
             body.query, project_id=body.project_id or project_id,
             zone=body.zone, category=body.category, top_k=body.top_k,
@@ -1280,13 +1302,13 @@ def create_app(cfg: Config) -> FastAPI:
             await hub.disconnect(client)
 
     @app.get("/broadcast/clients")
-    async def broadcast_clients():
+    async def broadcast_clients(_: dict[str, Any] = Depends(any_user)):
         return {"clients": hub.clients(), "stats": hub.stats()}
 
     # ---------------------------------------------------------------- workers
 
     @app.get("/workers")
-    async def list_workers():
+    async def list_workers(_: dict[str, Any] = Depends(any_user)):
         alerts = await store.list_alerts(limit=1000)
         workers: dict[str, dict[str, Any]] = {}
         for a in alerts:
@@ -1299,7 +1321,15 @@ def create_app(cfg: Config) -> FastAPI:
         return {"workers": sorted(workers.values(), key=lambda w: -w["active_alerts"])}
 
     @app.get("/workers/{worker_id}/timeline")
-    async def worker_timeline(worker_id: str, event_limit: int = Query(default=50, le=500)):
+    async def worker_timeline(
+        worker_id: str, event_limit: int = Query(default=50, le=500),
+        user: dict[str, Any] = Depends(any_user),
+    ):
+        # I4: this is the other route the brief names by name — a worker's 360° view is exactly
+        # the "colleague's alert history" an IDOR would leak; only the account's own worker_id
+        # (or a site manager, who legitimately sees everyone's) may look.
+        if user.get("role") == "worker" and _worker_id(user) != worker_id:
+            raise HTTPException(403, "you can only view your own timeline")
         all_alerts = await store.list_alerts(worker_id=worker_id, limit=500)
         active = [a for a in all_alerts if a["state"] in ("NEW", "ACTIVE")]
         past = [a for a in all_alerts if a["state"] in ("RESOLVED", "SUPPRESSED")]
@@ -1341,7 +1371,7 @@ def create_app(cfg: Config) -> FastAPI:
         return {"enabled": body.enabled}
 
     @app.get("/control/inspection")
-    async def get_inspection():
+    async def get_inspection(_: dict[str, Any] = Depends(any_user)):
         state = await cache.get("control:inspection")
         return {"enabled": bool(state and state.get("enabled"))}
 

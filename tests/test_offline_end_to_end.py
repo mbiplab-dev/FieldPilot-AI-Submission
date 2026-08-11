@@ -191,6 +191,8 @@ async def test_queued_events_reach_a_real_backend_and_are_idempotent(outbox, mon
         # the event's own id is stable, so a genuine double-delivery would still dedup downstream
         client.post("/events", json=ev)
         await asyncio.sleep(1.5)
-        events = client.get("/events").json()["events"]
+        login = client.post("/auth/login", json={"username": "manager", "password": "manager123"})
+        headers = {"Authorization": f"Bearer {login.json()['token']}"}
+        events = client.get("/events", headers=headers).json()["events"]
         matching = [e for e in events if e["event_id"] == ev["event_id"]]
         assert len(matching) == 1, f"event log must be idempotent on event_id, got {len(matching)}"

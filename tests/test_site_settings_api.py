@@ -47,14 +47,14 @@ def _ppe_event(worker="w-1", item="helmet", cls="NO-Hardhat", dedup=None, severi
     }
 
 
-def _wait_for_alerts(client, count=1, budget=6.0):
+def _wait_for_alerts(client, count=1, budget=6.0, headers=None):
     deadline = time.time() + budget
     while time.time() < deadline:
-        alerts = client.get("/alerts").json()["alerts"]
+        alerts = client.get("/alerts", headers=headers).json()["alerts"]
         if len(alerts) >= count:
             return alerts
         time.sleep(0.1)
-    return client.get("/alerts").json()["alerts"]
+    return client.get("/alerts", headers=headers).json()["alerts"]
 
 
 # ------------------------------------------------------------------ site config
@@ -133,7 +133,8 @@ def test_partial_monitoring_update_leaves_the_other_field_alone(client):
 
 
 def test_models_endpoint_lists_the_registry(client):
-    body = client.get("/models").json()
+    _, manager_h = login(client, MANAGER)
+    body = client.get("/models", headers=manager_h).json()
     keys = {m["key"] for m in body["models"]}
     # the four pinned public PPE checkpoints ported from hrm must all be offered
     assert {"ppe_construction_n", "ppe_helmet_vest_n", "ppe_safetyvision_s", "ppe_vyra_m"} <= keys
@@ -155,7 +156,7 @@ def test_model_choice_is_recorded_without_downloading(client):
     assert r.status_code == 200
     assert r.json()["model_key"] == "ppe_construction_n"
     assert r.json()["weights"] is None, "download=False must not fetch anything"
-    assert client.get("/models").json()["selected"] == "ppe_construction_n"
+    assert client.get("/models", headers=manager_h).json()["selected"] == "ppe_construction_n"
 
 
 def test_select_with_download_awaits_the_registry_and_returns_a_real_path(client, monkeypatch,
@@ -205,13 +206,14 @@ def test_select_surfaces_a_download_failure_instead_of_a_500(client, monkeypatch
 
 
 def test_alert_stats_summarises_the_board(client):
+    _, manager_h = login(client, MANAGER)
     client.post("/events", json=_ppe_event(worker="w-1", dedup="helmet-1"))
     client.post("/events", json=_ppe_event(worker="w-2", item="vest",
                                            cls="NO-Safety Vest", dedup="vest-1"))
-    alerts = _wait_for_alerts(client, 2)
+    alerts = _wait_for_alerts(client, 2, headers=manager_h)
     assert len(alerts) >= 2
 
-    stats = client.get("/alerts/stats").json()
+    stats = client.get("/alerts/stats", headers=manager_h).json()
     assert stats["total"] >= 2
     assert stats["today"] >= 2
     assert stats["outstanding"] >= 2
@@ -223,7 +225,8 @@ def test_alert_stats_summarises_the_board(client):
 def test_stats_route_is_not_shadowed_by_the_alert_id_route(client):
     """`/alerts/stats` must resolve to the summary, not be read as an alert id."""
 
-    r = client.get("/alerts/stats")
+    _, manager_h = login(client, MANAGER)
+    r = client.get("/alerts/stats", headers=manager_h)
     assert r.status_code == 200
     assert "outstanding" in r.json()
 
@@ -231,15 +234,15 @@ def test_stats_route_is_not_shadowed_by_the_alert_id_route(client):
 def test_acknowledging_an_alert_resolves_it_and_updates_stats(client):
     _, manager_h = login(client, MANAGER)
     client.post("/events", json=_ppe_event(dedup="ack-1"))
-    alerts = _wait_for_alerts(client, 1)
+    alerts = _wait_for_alerts(client, 1, headers=manager_h)
     alert_id = alerts[0]["alert_id"]
     assert alerts[0]["state"] in ("NEW", "ACTIVE")
 
-    before = client.get("/alerts/stats").json()["outstanding"]
+    before = client.get("/alerts/stats", headers=manager_h).json()["outstanding"]
     r = client.post(f"/alerts/{alert_id}/acknowledge", headers=manager_h)
     assert r.status_code == 200
 
-    assert client.get(f"/alerts/{alert_id}").json()["state"] == "RESOLVED"
-    after = client.get("/alerts/stats").json()
+    assert client.get(f"/alerts/{alert_id}", headers=manager_h).json()["state"] == "RESOLVED"
+    after = client.get("/alerts/stats", headers=manager_h).json()
     assert after["outstanding"] == before - 1
     assert after["resolved"] >= 1

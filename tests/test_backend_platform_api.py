@@ -79,11 +79,11 @@ def _ppe_event(worker="w-1", item="helmet", zone="zone-a", cls="NO-Hardhat"):
     }
 
 
-def _alert_for(client, **kw) -> dict:
+def _alert_for(client, headers=None, **kw) -> dict:
     assert client.post("/events", json=_ppe_event(**kw)).status_code == 202
     for _ in range(40):
         time.sleep(0.1)
-        alerts = client.get("/alerts").json()["alerts"]
+        alerts = client.get("/alerts", headers=headers).json()["alerts"]
         if alerts:
             return alerts[0]
     raise AssertionError("no alert was created")
@@ -93,7 +93,8 @@ def _alert_for(client, **kw) -> dict:
 
 
 def test_default_zones_are_seeded_with_hazard_levels(client):
-    zones = client.get("/zones").json()["zones"]
+    _, manager_h = login(client, MANAGER)
+    zones = client.get("/zones", headers=manager_h).json()["zones"]
     assert len(zones) == 4
     by_id = {z["zone_id"]: z for z in zones}
     assert by_id["zone-a"]["hazard_level"] == "high"
@@ -111,7 +112,7 @@ def test_zone_crud_round_trip(client):
     assert zid == "zone-z-crane-pad"          # slugified from the name
     assert created.json()["danger"] is True    # high hazard implies a danger zone by default
 
-    assert client.get(f"/zones/{zid}").json()["name"] == "Zone Z — Crane Pad"
+    assert client.get(f"/zones/{zid}", headers=manager_h).json()["name"] == "Zone Z — Crane Pad"
 
     updated = client.put(f"/zones/{zid}", json={"description": "tower crane base", "active": False},
                          headers=manager_h)
@@ -120,7 +121,7 @@ def test_zone_crud_round_trip(client):
     assert updated.json()["active"] is False
 
     assert client.delete(f"/zones/{zid}", headers=manager_h).json()["deleted"] is True
-    assert client.get(f"/zones/{zid}").status_code == 404
+    assert client.get(f"/zones/{zid}", headers=manager_h).status_code == 404
     assert client.delete(f"/zones/{zid}", headers=manager_h).status_code == 404
 
 
@@ -140,7 +141,8 @@ def test_zone_validation_and_duplicates_are_rejected(client):
 def test_active_only_filter(client):
     _, manager_h = login(client, MANAGER)
     client.put("/zones/zone-d", json={"active": False}, headers=manager_h)
-    active = client.get("/zones", params={"active_only": "true"}).json()["zones"]
+    active = client.get("/zones", params={"active_only": "true"},
+                        headers=manager_h).json()["zones"]
     assert "zone-d" not in {z["zone_id"] for z in active}
 
 
@@ -149,7 +151,7 @@ def test_active_only_filter(client):
 
 def test_feedback_records_the_detector_class_and_bbox(client):
     _, manager_h = login(client, MANAGER)
-    alert = _alert_for(client)
+    alert = _alert_for(client, headers=manager_h)
     r = client.post(f"/alerts/{alert['alert_id']}/feedback",
                     json={"decision": "approve", "reviewer": "jo", "notes": "correct"},
                     headers=manager_h)
@@ -161,25 +163,25 @@ def test_feedback_records_the_detector_class_and_bbox(client):
     assert body["reviewer"] == "jo"
     assert body["consumed_at"] is None
 
-    stats = client.get("/feedback/stats").json()
+    stats = client.get("/feedback/stats", headers=manager_h).json()
     assert stats == {"approved": 1, "rejected": 0, "total": 1,
                      "unconsumed": 1, "approval_rate": 1.0}
 
 
 def test_rejecting_an_alert_suppresses_it(client):
     _, manager_h = login(client, MANAGER)
-    alert = _alert_for(client)
+    alert = _alert_for(client, headers=manager_h)
     assert alert["state"] in ("NEW", "ACTIVE")
     r = client.post(f"/alerts/{alert['alert_id']}/feedback", json={"decision": "reject"},
                     headers=manager_h)
     assert r.status_code == 200
-    after = client.get(f"/alerts/{alert['alert_id']}").json()
+    after = client.get(f"/alerts/{alert['alert_id']}", headers=manager_h).json()
     assert after["state"] == "SUPPRESSED", "a rejected detection is also a live false positive"
 
 
 def test_feedback_errors(client):
     _, manager_h = login(client, MANAGER)
-    alert = _alert_for(client)
+    alert = _alert_for(client, headers=manager_h)
     assert client.post(f"/alerts/{alert['alert_id']}/feedback",
                        json={"decision": "perhaps"}, headers=manager_h).status_code == 400
     assert client.post("/alerts/does-not-exist/feedback",
@@ -188,13 +190,17 @@ def test_feedback_errors(client):
 
 def test_feedback_listing_filters(client):
     _, manager_h = login(client, MANAGER)
-    alert = _alert_for(client)
+    alert = _alert_for(client, headers=manager_h)
     client.post(f"/alerts/{alert['alert_id']}/feedback", json={"decision": "approve"},
                headers=manager_h)
-    assert len(client.get("/feedback", params={"decision": "approve"}).json()["feedback"]) == 1
-    assert len(client.get("/feedback", params={"decision": "reject"}).json()["feedback"]) == 0
-    assert len(client.get("/feedback", params={"event_type": "ppe"}).json()["feedback"]) == 1
-    assert len(client.get("/feedback", params={"unconsumed_only": "true"}).json()["feedback"]) == 1
+    assert len(client.get("/feedback", params={"decision": "approve"},
+                         headers=manager_h).json()["feedback"]) == 1
+    assert len(client.get("/feedback", params={"decision": "reject"},
+                         headers=manager_h).json()["feedback"]) == 0
+    assert len(client.get("/feedback", params={"event_type": "ppe"},
+                         headers=manager_h).json()["feedback"]) == 1
+    assert len(client.get("/feedback", params={"unconsumed_only": "true"},
+                         headers=manager_h).json()["feedback"]) == 1
 
 
 # ------------------------------------------------------------------ learning
@@ -210,21 +216,24 @@ def test_training_is_blocked_without_enough_feedback_and_says_why(client):
     assert run["promoted"] is False
     assert run["map50_before"] is None
 
-    runs = client.get("/learning/runs").json()["runs"]
+    runs = client.get("/learning/runs", headers=manager_h).json()["runs"]
     assert len(runs) == 1 and runs[0]["run_id"] == run["run_id"]
-    assert client.get(f"/learning/runs/{run['run_id']}").json()["status"] == "blocked"
-    assert client.get("/learning/runs/nope").status_code == 404
+    assert client.get(f"/learning/runs/{run['run_id']}",
+                      headers=manager_h).json()["status"] == "blocked"
+    assert client.get("/learning/runs/nope", headers=manager_h).status_code == 404
 
 
 def test_latest_learning_run_is_empty_before_any_completed_run(client):
-    assert client.get("/learning/latest").json() in (None, {})
+    _, manager_h = login(client, MANAGER)
+    assert client.get("/learning/latest", headers=manager_h).json() in (None, {})
 
 
 # ------------------------------------------------------------------ RAG (degraded)
 
 
 def test_blueprint_status_is_honest_when_qdrant_is_down(client):
-    body = client.get("/blueprints").json()
+    _, manager_h = login(client, MANAGER)
+    body = client.get("/blueprints", headers=manager_h).json()
     assert body["available"] is False
     assert body["indexed_chunks"] == 0
     assert body["documents"] == []
@@ -240,7 +249,9 @@ def test_ingest_refuses_rather_than_pretending(client):
 
 
 def test_search_returns_empty_without_an_index(client):
-    r = client.post("/blueprints/search", json={"query": "rebar spacing", "zone": "zone-a"})
+    _, manager_h = login(client, MANAGER)
+    r = client.post("/blueprints/search", json={"query": "rebar spacing", "zone": "zone-a"},
+                    headers=manager_h)
     assert r.status_code == 200
     assert r.json()["chunks"] == []
 
@@ -248,7 +259,7 @@ def test_search_returns_empty_without_an_index(client):
 # ------------------------------------------------------------------ RFI review queue
 
 
-def _seed_rfi(client, zone="zone-a") -> dict:
+def _seed_rfi(client, zone="zone-a", headers=None) -> dict:
     """Drive a measurement deviation big enough to trip the seeded `rebar-deviation-rfi`."""
 
     client.post("/events", json={
@@ -259,14 +270,15 @@ def _seed_rfi(client, zone="zone-a") -> dict:
     })
     for _ in range(60):
         time.sleep(0.1)
-        rfis = client.get("/rfis").json()["rfis"]
+        rfis = client.get("/rfis", headers=headers).json()["rfis"]
         if rfis:
             return rfis[0]
     raise AssertionError("no RFI was drafted")
 
 
 def test_rfi_is_filed_pending_review_and_flagged_ungrounded_without_specs(client):
-    rfi = _seed_rfi(client)
+    _, manager_h = login(client, MANAGER)
+    rfi = _seed_rfi(client, headers=manager_h)
     assert rfi["status"] == "pending_review"
     assert rfi["zone"] == "zone-a"
     # no blueprint index is reachable, so the RFI must declare itself ungrounded rather than
@@ -280,9 +292,10 @@ def test_rfi_is_filed_pending_review_and_flagged_ungrounded_without_specs(client
 
 def test_rfi_approve_and_reject_transitions(client):
     _, manager_h = login(client, MANAGER)
-    rfi = _seed_rfi(client)
+    rfi = _seed_rfi(client, headers=manager_h)
     rid = rfi["rfi_id"]
-    assert len(client.get("/rfis", params={"status": "pending_review"}).json()["rfis"]) == 1
+    assert len(client.get("/rfis", params={"status": "pending_review"},
+                         headers=manager_h).json()["rfis"]) == 1
 
     approved = client.post(f"/rfis/{rid}/approve", json={"reviewer": "sam", "notes": "valid"},
                            headers=manager_h)
@@ -290,13 +303,14 @@ def test_rfi_approve_and_reject_transitions(client):
     assert approved.json()["status"] == "approved"
     assert approved.json()["reviewer"] == "sam"
     assert approved.json()["reviewed_at"] is not None
-    assert len(client.get("/rfis", params={"status": "pending_review"}).json()["rfis"]) == 0
+    assert len(client.get("/rfis", params={"status": "pending_review"},
+                         headers=manager_h).json()["rfis"]) == 0
 
     rejected = client.post(f"/rfis/{rid}/reject", json={"reviewer": "sam"}, headers=manager_h)
     assert rejected.json()["status"] == "rejected"
 
-    assert client.get(f"/rfis/{rid}").json()["status"] == "rejected"
-    assert client.get("/rfis/missing").status_code == 404
+    assert client.get(f"/rfis/{rid}", headers=manager_h).json()["status"] == "rejected"
+    assert client.get("/rfis/missing", headers=manager_h).status_code == 404
     assert client.post("/rfis/missing/approve", json={}, headers=manager_h).status_code == 404
 
 
@@ -310,7 +324,7 @@ def test_inspection_completion(client):
     insp = None
     for _ in range(40):
         time.sleep(0.1)
-        items = client.get("/inspections").json()["inspections"]
+        items = client.get("/inspections", headers=manager_h).json()["inspections"]
         if items:
             insp = items[0]
             break
@@ -350,7 +364,7 @@ def test_websocket_delivers_alerts_to_dashboards_and_advisories_to_zone_devices(
         for sock in (dash, dev_a, dev_b):
             assert sock.receive_json()["topic"] == "hello"
 
-        stats = client.get("/broadcast/clients").json()["stats"]
+        stats = client.get("/broadcast/clients", headers=manager_h).json()["stats"]
         assert stats["connected"] == 3
         assert stats["devices"] == 2 and stats["dashboards"] == 1
 
