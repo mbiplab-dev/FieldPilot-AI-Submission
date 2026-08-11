@@ -29,10 +29,13 @@ is; these files say how it works, how to run it, and what is and is not built.
 | [possibilities.md](possibilities.md) | The catalogue of construction CV applications |
 | [possibilities-coverage.md](possibilities-coverage.md) | Which of those this system actually covers |
 | [branch-integration.md](branch-integration.md) | How the `hrm` branch was merged in |
+| [audit-2026-08-11.md](audit-2026-08-11.md) | Security and correctness audit — **6 Critical findings, all still open** |
 | [build-log.txt](build-log.txt) | Dated log of what was built, why, and the traps hit along the way |
 
-If you are picking this project up cold and want the unvarnished version, read
-**pitch-vs-code.md** first. It is the file that says which impressive-sounding claims are real.
+If you are picking this project up cold, read **audit-2026-08-11.md** first — it lists six open
+Critical defects, including that most of the REST surface and the entire vision edge currently
+accept unauthenticated requests. Then **pitch-vs-code.md**, which says which impressive-sounding
+claims are real.
 
 ## Conventions
 
