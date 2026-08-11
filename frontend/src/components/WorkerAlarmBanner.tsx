@@ -115,19 +115,3 @@ export function WorkerAlarmBanner() {
     </div>
   );
 }
-
-/** Small red marker for a hand-raised report inside a list. */
-export function ReportedByWorker({ name }: { name?: string | null }) {
-  return (
-    <span
-      title={name ? `Reported by ${name}` : "Reported by a worker"}
-      className="inline-flex items-center gap-1 rounded-full bg-red-500/15 px-1.5 py-0.5 text-[10px] font-bold text-red-500"
-    >
-      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
-        <path d="M12 9v4M12 17h.01" />
-      </svg>
-      WORKER
-    </span>
-  );
-}

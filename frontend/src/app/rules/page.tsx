@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { PageHeader } from "@/components/PageHeader";
-import { Card, Empty, ErrorState, Loading, Note } from "@/components/ui";
+import { Card, Empty, ErrorState, Loading, Note, Td, Th } from "@/components/ui";
 import { api, errorMessage, type Rule } from "@/lib/api";
 import { usePoll } from "@/lib/usePoll";
 
@@ -67,7 +67,7 @@ export default function RulesPage() {
               <Th>Action</Th>
               <Th>Cooldown</Th>
               <Th>Enabled</Th>
-              <Th>{" "}</Th>
+              <Th />
             </tr>
           </thead>
           <tbody>
@@ -113,13 +113,13 @@ export default function RulesPage() {
             ))}
             {rules.length === 0 && (
               <tr>
-                <td colSpan={7}>
+                <Td colSpan={7}>
                   {loading ? (
                     <Loading label="Loading rules…" />
                   ) : (
                     <Empty>No rules configured — the rules engine has nothing to evaluate.</Empty>
                   )}
-                </td>
+                </Td>
               </tr>
             )}
           </tbody>
@@ -127,11 +127,4 @@ export default function RulesPage() {
       </Card>
     </div>
   );
-}
-
-function Th({ children }: { children: React.ReactNode }) {
-  return <th className="px-3.5 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-txt-3">{children}</th>;
-}
-function Td({ children }: { children: React.ReactNode }) {
-  return <td className="px-3.5 py-2.5 text-[13px] align-middle">{children}</td>;
 }

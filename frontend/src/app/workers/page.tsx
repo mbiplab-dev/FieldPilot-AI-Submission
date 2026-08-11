@@ -3,7 +3,20 @@
 import { useState } from "react";
 import Link from "next/link";
 import { PageHeader } from "@/components/PageHeader";
-import { Badge, Button, Card, Empty, ErrorState, Field, Loading, Note, SectionTitle, inputClass } from "@/components/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  Empty,
+  ErrorState,
+  Field,
+  Loading,
+  Note,
+  SectionTitle,
+  Td,
+  Th,
+  inputClass,
+} from "@/components/ui";
 import { api, errorMessage, type AuthUser, type WorkerSummary } from "@/lib/api";
 import { usePoll } from "@/lib/usePoll";
 
@@ -110,7 +123,7 @@ export default function WorkersPage() {
               ))
             ) : (
               <tr>
-                <td colSpan={4}>
+                <Td colSpan={4}>
                   {loading ? (
                     <Loading label="Loading workers…" />
                   ) : (
@@ -118,7 +131,7 @@ export default function WorkersPage() {
                       No workers seen yet — events carry worker_id when the edge tracks people.
                     </Empty>
                   )}
-                </td>
+                </Td>
               </tr>
             )}
           </tbody>
@@ -246,16 +259,5 @@ export default function WorkersPage() {
         </Card>
       )}
     </div>
-  );
-}
-
-function Th({ children }: { children: React.ReactNode }) {
-  return <th className="px-3.5 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-txt-3">{children}</th>;
-}
-function Td({ children, colSpan }: { children: React.ReactNode; colSpan?: number }) {
-  return (
-    <td colSpan={colSpan} className="px-3.5 py-2.5 text-[13px] align-middle">
-      {children}
-    </td>
   );
 }

@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useEffectEvent, useState } from "react";
-import type { Alert, LearningRun, RFI } from "@/lib/api";
 
 /**
  * Resilient client for the backend broadcast socket (`ws://<host>:8100/ws`).
@@ -11,24 +10,14 @@ import type { Alert, LearningRun, RFI } from "@/lib/api";
  * `NEXT_PUBLIC_FIELDPILOT_WS` override for non-local deployments.
  *
  * Live push is an optimisation, never a requirement: every consumer keeps a
- * polling fallback and uses `connected` to show a degraded indicator.
+ * polling fallback and uses `connected` to show a degraded indicator. Each
+ * consumer names its own topics inline (there is no shared topic enum here —
+ * one drifted out of sync with what pages actually subscribe to and was
+ * removed rather than fixed blind).
  */
 
-export const LIVE_TOPICS = [
-  "alert",
-  "alert_resolved",
-  "notification",
-  "advisory",
-  "rfi",
-  "inspection",
-  "learning",
-  "zone",
-] as const;
-
-export type LiveTopic = (typeof LIVE_TOPICS)[number];
-
 export interface LiveFrame {
-  /** One of {@link LIVE_TOPICS} — kept as `string` because the server may add more. */
+  /** e.g. "alert", "rfi", "zone" — kept as `string` because the server may add more. */
   topic: string;
   zone: string | null;
   /** Server timestamp, seconds since epoch. */
@@ -255,21 +244,6 @@ function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
-}
-
-export function frameAlert(frame: LiveFrame): Alert | null {
-  const rec = record(frame.data);
-  return rec && typeof rec.alert_id === "string" ? (frame.data as Alert) : null;
-}
-
-export function frameLearningRun(frame: LiveFrame): LearningRun | null {
-  const rec = record(frame.data);
-  return rec && typeof rec.run_id === "string" ? (frame.data as LearningRun) : null;
-}
-
-export function frameRfi(frame: LiveFrame): RFI | null {
-  const rec = record(frame.data);
-  return rec && typeof rec.rfi_id === "string" ? (frame.data as RFI) : null;
 }
 
 /** Best-effort one-line description of a frame, for tickers. */

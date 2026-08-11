@@ -15,7 +15,7 @@ import {
   StatTile,
   StateChip,
 } from "@/components/ui";
-import { api, timeAgo, type Alert, type Inspection, type RFIStatus } from "@/lib/api";
+import { api, timeAgo, type Alert, type Inspection, type RFIStatus, type Severity } from "@/lib/api";
 import { usePoll } from "@/lib/usePoll";
 import { useLiveFeed } from "@/lib/useLiveFeed";
 
@@ -24,6 +24,9 @@ const RFI_TONE: Record<RFIStatus, "warn" | "good" | "bad"> = {
   approved: "good",
   rejected: "bad",
 };
+
+/** Worst-first, so a critical alert never scrolls below a medium one that merely arrived later. */
+const SEVERITY_RANK: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 
 /** Optional endpoints: a miss degrades one tile instead of blanking the page. */
 async function soft<T>(p: Promise<T>): Promise<T | null> {
@@ -75,7 +78,11 @@ export default function OverviewPage() {
   }
 
   const workers = data.workers.workers;
-  const act = data.alerts.alerts.filter((a) => a.state === "NEW" || a.state === "ACTIVE");
+  const act = data.alerts.alerts
+    .filter((a) => a.state === "NEW" || a.state === "ACTIVE")
+    // Worst-first: this feeds the "Active alerts" preview below, and a manager glancing at the
+    // overview must see the critical one before eight medium ones that merely arrived later.
+    .sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || b.last_seen - a.last_seen);
   const crit = act.filter((a) => a.severity === "critical").length;
   const high = act.filter((a) => a.severity === "high").length;
   const med = act.filter((a) => a.severity === "medium").length;
@@ -142,7 +149,9 @@ export default function OverviewPage() {
       <div className="mt-7 grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div>
           <SectionTitle>Active alerts</SectionTitle>
-          <Card>
+          {/* A critical alert must outrank everything else on this page for the manager's eye —
+              the red ring is the same visual language as the worker-raised-alarm banner. */}
+          <Card className={crit ? "border-red-500/50 ring-1 ring-red-500/20" : ""}>
             {act.length ? (
               act.slice(0, 8).map((a: Alert) => <AlertRow key={a.alert_id} alert={a} />)
             ) : (

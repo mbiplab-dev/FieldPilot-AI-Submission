@@ -62,7 +62,8 @@ function synth(): SpeechSynthesis | null {
   return "speechSynthesis" in window ? window.speechSynthesis : null;
 }
 
-export function speechSupported(): boolean {
+/** Not exported — every consumer reads `supported` off {@link VoiceState} instead. */
+function speechSupported(): boolean {
   return synth() !== null;
 }
 

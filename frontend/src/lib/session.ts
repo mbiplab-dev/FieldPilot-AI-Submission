@@ -158,13 +158,6 @@ export function setSession(token: string, user: unknown): boolean {
   return true;
 }
 
-/** Refreshes the cached profile (e.g. after `GET /auth/me`) without touching the token. */
-export function updateSessionUser(user: unknown): void {
-  const current = readSession();
-  if (!current.token) return;
-  setSession(current.token, user);
-}
-
 export function clearSession(): void {
   readSession();
   try {

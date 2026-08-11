@@ -346,40 +346,6 @@ export interface Feedback {
   bbox?: number[];
 }
 
-export interface FeedbackStats {
-  approved: number;
-  rejected: number;
-  total: number;
-  unconsumed: number;
-  approval_rate: number | null;
-}
-
-/* ------------------------------- learning loop ------------------------------- */
-
-export type LearningStatus = "pending" | "running" | "completed" | "failed" | "blocked";
-
-export interface LearningRun {
-  run_id: string;
-  status: LearningStatus;
-  base_weights: string;
-  weights_path: string | null;
-  dataset_dir: string;
-  samples: number;
-  epochs: number;
-  map50_before: number | null;
-  map50_after: number | null;
-  delta: number | null;
-  promoted: boolean;
-  message: string;
-  created_at: number;
-  finished_at: number | null;
-}
-
-export interface TrainRequest {
-  epochs?: number;
-  base_weights?: string;
-}
-
 /* ----------------------------------- RFIs ----------------------------------- */
 
 export type RFIStatus = "pending_review" | "approved" | "rejected";
@@ -422,55 +388,13 @@ export interface RFIReview {
   notes?: string;
 }
 
-/* ------------------------------ blueprints / RAG ------------------------------ */
+/* ---------------------------------- embeddings ---------------------------------- */
 
+/** Describes the RAG backend's embedding model — surfaced in `/health`, not yet a full page. */
 export interface EmbeddingInfo {
   backend: string;
   model: string | null;
   semantic: boolean;
-}
-
-export interface BlueprintDocument {
-  name: string;
-  project_id: string | null;
-  zone: string | null;
-  category: string | null;
-  size_bytes: number;
-}
-
-export interface BlueprintIndex {
-  documents: BlueprintDocument[];
-  indexed_chunks: number;
-  embeddings: EmbeddingInfo;
-  available: boolean;
-}
-
-export interface BlueprintIngestResult {
-  files: number;
-  chunks: number;
-  upserted: number;
-  skipped: string[];
-  degraded_embeddings: boolean;
-}
-
-export interface BlueprintSearchRequest {
-  query: string;
-  project_id?: string;
-  zone?: string;
-  category?: string;
-  top_k?: number;
-}
-
-export interface BlueprintChunk {
-  chunk_id: string;
-  text: string;
-  project_id: string | null;
-  zone: string | null;
-  category: string | null;
-  source: string | null;
-  page: number | null;
-  clause: string | null;
-  score: number;
 }
 
 /* --------------------------------- inspections --------------------------------- */
@@ -508,7 +432,10 @@ export interface PpeHealth {
   reason: string | null;
 }
 
-/** Compact learning summary embedded in `/health` — a subset of {@link LearningRun}. */
+/** Mirrors the fine-tune run's own status enum, kept local since the run type itself isn't. */
+export type LearningStatus = "pending" | "running" | "completed" | "failed" | "blocked";
+
+/** Compact learning summary embedded in `/health`. */
 export interface HealthLearning {
   run_id?: string;
   status?: LearningStatus;
@@ -545,7 +472,6 @@ export const api = {
   /* auth */
   login: (input: LoginInput) => post<LoginResult>("/auth/login", input),
   logout: () => post<{ ok: boolean }>("/auth/logout"),
-  me: () => get<AuthUser>("/auth/me"),
   users: () => get<{ users: AuthUser[] }>("/auth/users"),
   createUser: (input: CreateUserInput) => post<AuthUser>("/auth/users", input),
 
@@ -557,7 +483,6 @@ export const api = {
     q.set("limit", params.limit ?? "300");
     return get<{ alerts: Alert[] }>(`/alerts?${q}`);
   },
-  alert: (id: string) => get<Alert>(`/alerts/${encodeURIComponent(id)}`),
   alertAction: (id: string, op: "resolve" | "suppress" | "unsuppress") =>
     post<unknown>(`/alerts/${encodeURIComponent(id)}/${op}`),
 
@@ -574,7 +499,6 @@ export const api = {
 
   /* zones */
   zones: () => get<{ zones: Zone[] }>("/zones"),
-  zone: (id: string) => get<Zone>(`/zones/${encodeURIComponent(id)}`),
   createZone: (zone: ZoneCreate) => post<Zone>("/zones", zone),
   updateZone: (id: string, zone: ZoneUpdate) => put<Zone>(`/zones/${encodeURIComponent(id)}`, zone),
   deleteZone: (id: string) => del<{ deleted: boolean }>(`/zones/${encodeURIComponent(id)}`),
@@ -585,7 +509,6 @@ export const api = {
     get<{ questions: WorkerQuestion[] }>(
       `/questions${qs({ status: params.status, zone: params.zone, limit: params.limit ?? 100 })}`,
     ),
-  question: (id: string) => get<WorkerQuestion>(`/questions/${encodeURIComponent(id)}`),
   replyToQuestion: (id: string, input: QuestionReplyInput) =>
     post<WorkerQuestion>(`/questions/${encodeURIComponent(id)}/reply`, input),
   questionStats: () => get<QuestionStats>("/questions/stats"),
@@ -595,27 +518,12 @@ export const api = {
     post<Feedback>(`/alerts/${encodeURIComponent(alertId)}/feedback`, input),
   feedback: (params: { decision?: FeedbackDecision; event_type?: string; limit?: number } = {}) =>
     get<{ feedback: Feedback[] }>(`/feedback${qs({ ...params, limit: params.limit ?? 500 })}`),
-  feedbackStats: () => get<FeedbackStats>("/feedback/stats"),
-
-  /* learning loop */
-  train: (input: TrainRequest = {}) => post<LearningRun>("/learning/train", input),
-  learningRuns: (limit = 25) => get<{ runs: LearningRun[] }>(`/learning/runs${qs({ limit })}`),
-  learningRun: (id: string) => get<LearningRun>(`/learning/runs/${encodeURIComponent(id)}`),
-  latestLearningRun: () => get<LearningRun | null>("/learning/latest"),
 
   /* RFI review queue */
   rfis: (params: { status?: RFIStatus | ""; limit?: number } = {}) =>
     get<{ rfis: RFI[] }>(`/rfis${qs({ status: params.status, limit: params.limit ?? 50 })}`),
-  rfi: (id: string) => get<RFI>(`/rfis/${encodeURIComponent(id)}`),
   reviewRfi: (id: string, decision: "approve" | "reject", review: RFIReview = {}) =>
     post<RFI>(`/rfis/${encodeURIComponent(id)}/${decision}`, review),
-
-  /* blueprints / RAG */
-  blueprints: () => get<BlueprintIndex>("/blueprints"),
-  ingestBlueprints: (replace = false) =>
-    post<BlueprintIngestResult>("/blueprints/ingest", { replace }),
-  searchBlueprints: (input: BlueprintSearchRequest) =>
-    post<{ chunks: BlueprintChunk[] }>("/blueprints/search", input),
 
   /* inspections */
   inspections: (limit = 20) => get<{ inspections: Inspection[] }>(`/inspections${qs({ limit })}`),

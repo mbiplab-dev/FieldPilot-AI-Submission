@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Badge, Card, Empty, Note, SectionTitle } from "@/components/ui";
-import { api, errorMessage, timeAgo, workerStreamUrl, type WorkerCameraFeed } from "@/lib/api";
+import { api, timeAgo, workerStreamUrl, type WorkerCameraFeed } from "@/lib/api";
 import { usePoll } from "@/lib/usePoll";
 
 /** Stable identity so the `usePoll` fallback does not invent a new array every render. */
@@ -30,8 +30,10 @@ export function WorkerFeeds() {
       <SectionTitle>Worker cameras</SectionTitle>
 
       {error ? (
+        // `error` is already a rendered message (usePoll converts it) — wrapping it in
+        // errorMessage() again would just discard it in favour of "Unexpected error".
         <Note tone="warn" title="Could not reach the vision service">
-          {errorMessage(error)} Worker feeds are served by the edge on :8000.
+          {error} Worker feeds are served by the edge on :8000.
         </Note>
       ) : null}
 
