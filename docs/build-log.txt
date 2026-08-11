@@ -863,6 +863,81 @@ Procore/BIM 360, the second "Executive" dashboard + ROI calculator + 3D site
 map. The deck's impact figures (23 RFIs, $1.3M, 340h, 94.3%) are PROJECTIONS --
 nothing in this repo measures them. See docs/pitch-vs-code.md.
 
+
+--------------------------------------------------------------------------------
+SESSION 2026-08-10/11 — PHONE CAMERA, MESSAGING, ALWAYS-ON, DOCS REORG
+--------------------------------------------------------------------------------
+WHAT WAS BUILT
+* Worker phone camera -> laptop. The phone is a dumb capture device: it ships
+  frames over /ws/video and the SERVER runs YOLO + every detector. Started as
+  on-device JPEG (takePicture) but that caps at ~1.4 fps -- a full still capture
+  with autofocus/metering per frame. Switched to startImageStream sending RAW
+  NV21 planes with a 12-byte header (magic FPR1, w/h/stride/format, big-endian);
+  the server decodes. Reaches the ~10 fps target. Cost: ~4.6 MB/s at 480p, fine
+  on LAN, too heavy for a thin site uplink.
+* Per-worker feed registry (display/feeds.py) + GET /workers/live and
+  /workers/{id}/stream (MJPEG). Latest-frame-wins, no queue. Manager sees each
+  worker's annotated feed; boxes are burned in server-side because an MJPEG
+  response has no canvas to draw on.
+* Hazards from a phone record source_worker/source_camera_id/source_zone. This
+  is NOT the hazard's worker_id: a rear camera mostly sees colleagues, so the
+  person in frame and the phone's owner are different people.
+* Direct manager<->worker messaging with voice notes, both directions
+  (workforce/messages.py + /messages/*). Deliberately separate from questions.py:
+  a question has an LLM answer and a lifecycle; "on my way" does not belong on
+  that queue.
+* Dashboard rebuilt around worker cams: server camera and /camera page removed,
+  per-cam enlarge, right-hand column with alerts + LLM verdicts + spoken text,
+  red interrupt banner for worker-raised alarms, sidebar badges off the socket.
+* Camera is now ALWAYS-ON from sign-in (user's explicit call, reversing the
+  earlier opt-in default). Kept the LIVE indicator and a stop control: the
+  default changed, not the worker's ability to see and override it.
+* Real light/dark theming in the app, one seed evaluated twice.
+* Docs reorganised: everything except the description moved into docs/, new
+  setup.md + commands.md + index.md, README cut back to a description.
+
+BUGS FOUND AND FIXED
+* THE BIG ONE: the spoken alert was serialised behind LLM RFI drafting.
+  handle_event ran rules (which await an LLM draft) BEFORE the broadcast.
+  Invisible warm (~10ms), SECONDS cold. Broadcast now runs right after the LLM
+  gate. Regression test verified to actually fail under the old ordering.
+* The app hardcoded an `/api` prefix on every request -- that is the Next.js
+  rewrite convention and 404s against the backend. Paths are now unprefixed;
+  any prefix lives in baseUrl. A phone should not need the web dev server.
+* AndroidManifest needed a TTS_SERVICE <queries> entry; without it Android 11+
+  package-visibility hides the speech engine and flutter_tts fails SILENTLY.
+* Advisories were spoken but invisible -- never stored against a worker, so
+  /me/alerts could not contain them. Now shown under "Heard in your zone".
+* annotate() raised on an unparseable box, costing the whole frame. Skips now.
+* doctor reported absent espeak-ng as a warning implying speech was broken.
+  Speech is client-side; it is a neutral note now.
+
+GOTCHAS (the ones that cost real time)
+* STALE PROCESSES, three times: backend missing /auth, backend missing
+  /messages, edge missing decode_frame. Neither service hot-reloads. When a
+  change "does nothing", check the process start time BEFORE debugging code.
+* Do NOT `rm -rf frontend/.next` while the dev server runs -- it corrupts
+  Turbopack's cache DB and the server 500s.
+* `pkill -f "fieldpilot.run --backend"` also matches the shell running it and
+  kills your own command. Kill by port/PID.
+* `adb reverse` dies on any USB renegotiation. The camera needs BOTH tunnels
+  (8100 API + 8000 edge). ufw was silently blocking the Wi-Fi route while the
+  tunnel was also down -- both paths dead at once looks like an app bug.
+* The laptop's DHCP address moved four times in one session. Do not hardcode it.
+
+STILL OPEN
+* camera_stream.dart: socket onDone/onError clear _connected but not
+  _streaming, and there is no reconnect. Always-on + push-driven means a dead
+  socket leaves the capture callback running at sensor rate indefinitely.
+  Was minor at 3 fps opt-in; on an always-on battery device it is not.
+* hazard_to_event() sets worker_id = "w-{track_id}" from the TRACKER, which
+  collides with real account ids (w-1 is also Ravi Kumar). A detected person
+  can be misattributed to a real worker account.
+* Messages-tab widget tests hung on real network I/O and were removed at the
+  user's direction. Real fix: an injectable http.Client in ApiClient.
+* The edge on :8000 has NO auth. Anyone on the network can list and watch
+  worker camera feeds while that port is open.
+
 ================================================================================
 END OF LOG — append new sessions to §5, newest at the bottom.
 ================================================================================

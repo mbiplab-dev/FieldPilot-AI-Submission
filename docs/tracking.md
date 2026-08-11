@@ -211,7 +211,7 @@ notification; measurement event (rebar 27.5 mm) → RFI auto-generated; 500 dup/
 ## `hrm` branch integration (2026-08-03)
 `origin/hrm` is an unrelated history (no merge base) — a 3-file self-contained browser-webcam app.
 Its capabilities were ported into this architecture rather than carried as a second app; see
-[`docs/branch-integration.md`](./docs/branch-integration.md) for the full accounting.
+[`branch-integration.md`](./branch-integration.md) for the full accounting.
 
 | # | Ported capability | Status |
 |---|---|---|
