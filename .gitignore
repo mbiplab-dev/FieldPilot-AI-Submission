@@ -48,3 +48,8 @@ data/logs/
 
 # OS
 .DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.iml

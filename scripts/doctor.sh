@@ -4,6 +4,9 @@ set -u
 
 ok()   { printf "  \033[32m✓\033[0m %s\n" "$1"; }
 warn() { printf "  \033[33m!\033[0m %s\n" "$1"; }
+# Neutral note: true, worth knowing, but not a problem to fix. Distinct from `warn` so that a
+# green-but-for-one-note environment does not read as a broken one.
+info() { printf "  \033[36m·\033[0m %s\n" "$1"; }
 bad()  { printf "  \033[31m✗\033[0m %s\n" "$1"; }
 
 echo "FieldPilot AI — environment check"
@@ -43,10 +46,14 @@ else
     warn "no /dev/video0 — edge will use the synthetic source"
 fi
 
+# Spoken alerts are synthesised on the CLIENTS now — the worker's phone (flutter_tts) and the
+# dashboard (Web Speech API) — because the server's speakers are not where anyone is listening.
+# espeak-ng only affects the legacy server-side path in `alerts/tts.py`, so its absence is a note,
+# not a warning: reporting it as a problem implied spoken alerts were broken when they were not.
 if command -v espeak-ng >/dev/null 2>&1 || command -v espeak >/dev/null 2>&1; then
-    ok "espeak-ng TTS available (offline voice)"
+    ok "espeak-ng present (server-side TTS available)"
 else
-    warn "espeak-ng missing — local TTS fallback silent (apt install espeak-ng)"
+    info "espeak-ng absent — only affects server-side TTS; spoken alerts run on the phone and dashboard"
 fi
 
 if nvidia-smi >/dev/null 2>&1; then
