@@ -42,7 +42,7 @@ export function WorkerFeeds() {
           <Empty>
             {loading
               ? "Looking for worker cameras…"
-              : "No worker is streaming. A worker starts their feed from the Camera tab in the FieldPilot Worker app."}
+              : "No worker is streaming. A signed-in worker's camera starts on its own, so this usually means nobody is on shift, the app is closed, or their phone cannot reach this server."}
           </Empty>
         </Card>
       ) : (
