@@ -29,8 +29,10 @@ sits in the middle as noise control, but it is explicitly *not* a safety authori
 silently suppress a high-severity hazard, because a small model was measured binning a
 0.97-confidence fall.
 
-**Speaks.** Alerts are spoken on the devices people actually carry — the worker's phone and the
-manager's browser — so speech survives a disconnected site and needs no server audio stack.
+**Speaks and listens.** Alerts are spoken on the worker's phone and manager's browser. A worker can
+tap the large Pilot beacon and say “Hey FieldPilot” to invoke Android speech recognition, ask the
+local Gemma model about a photo, open the calibrated measurement tool, or prepare a hazard report.
+Reports still require explicit worker confirmation.
 
 **Files the paperwork.** A spec deviation auto-drafts an RFI, grounded in the site's own
 specification documents via retrieval. Citations come from the retrieved chunk's metadata, never
@@ -55,6 +57,8 @@ validation set.
 All of it is in [`docs/`](./docs) — start at [`docs/index.md`](./docs/index.md).
 
 - **[Setup and running](./docs/setup.md)** — install, run the services, connect a phone
+- **[Hackathon runbook](./docs/hackathon-demo.md)** — preflight, APK install, and three-minute flow
+- **[Model training](./docs/model-training.md)** — provenance, dataset audit, and promotion gates
 - **[Make commands](./docs/commands.md)** — every target, and which ones are destructive
 - **[Architecture](./docs/architecture.md)** — the event chain and why it is inviolable
 - **[Pitch vs. code](./docs/pitch-vs-code.md)** — every claim marked built, built-differently, or
@@ -69,8 +73,9 @@ camera streaming with per-worker feeds, grounded RFI drafting, zone occupancy an
 questions, manager↔worker messaging with voice, offline store-and-forward, and the no-regression
 learning gate.
 
-Not built, and deliberately not stubbed: smart-glasses hardware and open-ear audio, Whisper voice
-intake, monocular depth, BLE indoor positioning, a graph database, 3D reconstruction, and the
-Procore/BIM and WhatsApp integrations. The impact figures in the pitch deck are projections that
-nothing in this repository measures. See
+Not built, and deliberately not stubbed: always-listening wake-word hardware, Whisper STT,
+monocular depth, BLE indoor positioning, a graph database, 3D reconstruction, and the Procore/BIM
+and WhatsApp integrations. The current Android STT is tap-to-arm, and camera measurement requires
+a coplanar known-size reference. The impact figures in the pitch deck are projections that nothing
+in this repository measures. See
 [`docs/pitch-vs-code.md`](./docs/pitch-vs-code.md).

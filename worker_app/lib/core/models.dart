@@ -36,14 +36,14 @@ class WorkerUser {
   bool get isWorker => role == 'worker';
 
   factory WorkerUser.fromJson(Map<String, dynamic> json) => WorkerUser(
-        userId: json['user_id'] as String,
-        username: json['username'] as String,
-        displayName: (json['display_name'] as String?)?.trim().isNotEmpty == true
-            ? json['display_name'] as String
-            : json['username'] as String,
-        role: json['role'] as String,
-        workerId: json['worker_id'] as String?,
-      );
+    userId: json['user_id'] as String,
+    username: json['username'] as String,
+    displayName: (json['display_name'] as String?)?.trim().isNotEmpty == true
+        ? json['display_name'] as String
+        : json['username'] as String,
+    role: json['role'] as String,
+    workerId: json['worker_id'] as String?,
+  );
 }
 
 class Alert {
@@ -74,17 +74,17 @@ class Alert {
   bool get isActive => state == 'NEW' || state == 'ACTIVE';
 
   factory Alert.fromJson(Map<String, dynamic> json) => Alert(
-        alertId: json['alert_id'] as String,
-        eventType: json['event_type'] as String,
-        workerId: json['worker_id'] as String?,
-        zone: json['zone'] as String?,
-        severity: (json['severity'] as String?) ?? 'medium',
-        state: (json['state'] as String?) ?? 'NEW',
-        hitCount: (json['hit_count'] as num?)?.toInt() ?? 1,
-        lastSeen: (json['last_seen'] as num?)?.toDouble() ?? 0,
-        message: json['message'] as String?,
-        imageUrl: json['image_url'] as String?,
-      );
+    alertId: json['alert_id'] as String,
+    eventType: json['event_type'] as String,
+    workerId: json['worker_id'] as String?,
+    zone: json['zone'] as String?,
+    severity: (json['severity'] as String?) ?? 'medium',
+    state: (json['state'] as String?) ?? 'NEW',
+    hitCount: (json['hit_count'] as num?)?.toInt() ?? 1,
+    lastSeen: (json['last_seen'] as num?)?.toDouble() ?? 0,
+    message: json['message'] as String?,
+    imageUrl: json['image_url'] as String?,
+  );
 }
 
 class ZoneInfo {
@@ -105,13 +105,13 @@ class ZoneInfo {
   });
 
   factory ZoneInfo.fromJson(Map<String, dynamic> json) => ZoneInfo(
-        zoneId: json['zone_id'] as String,
-        name: (json['name'] as String?) ?? json['zone_id'] as String,
-        hazardLevel: (json['hazard_level'] as String?) ?? 'medium',
-        danger: json['danger'] as bool? ?? false,
-        active: json['active'] as bool? ?? true,
-        description: (json['description'] as String?) ?? '',
-      );
+    zoneId: json['zone_id'] as String,
+    name: (json['name'] as String?) ?? json['zone_id'] as String,
+    hazardLevel: (json['hazard_level'] as String?) ?? 'medium',
+    danger: json['danger'] as bool? ?? false,
+    active: json['active'] as bool? ?? true,
+    description: (json['description'] as String?) ?? '',
+  );
 }
 
 class ZoneOccupancy {
@@ -119,13 +119,17 @@ class ZoneOccupancy {
   final String? zoneName;
   final double enteredAt;
 
-  ZoneOccupancy({required this.zoneId, required this.zoneName, required this.enteredAt});
+  ZoneOccupancy({
+    required this.zoneId,
+    required this.zoneName,
+    required this.enteredAt,
+  });
 
   factory ZoneOccupancy.fromJson(Map<String, dynamic> json) => ZoneOccupancy(
-        zoneId: json['zone_id'] as String,
-        zoneName: json['zone_name'] as String?,
-        enteredAt: (json['entered_at'] as num?)?.toDouble() ?? 0,
-      );
+    zoneId: json['zone_id'] as String,
+    zoneName: json['zone_name'] as String?,
+    enteredAt: (json['entered_at'] as num?)?.toDouble() ?? 0,
+  );
 }
 
 class Citation {
@@ -133,13 +137,17 @@ class Citation {
   final String? clause;
   final String? source;
 
-  Citation({required this.citation, required this.clause, required this.source});
+  Citation({
+    required this.citation,
+    required this.clause,
+    required this.source,
+  });
 
   factory Citation.fromJson(Map<String, dynamic> json) => Citation(
-        citation: (json['citation'] as String?) ?? '',
-        clause: json['clause'] as String?,
-        source: json['source'] as String?,
-      );
+    citation: (json['citation'] as String?) ?? '',
+    clause: json['clause'] as String?,
+    source: json['source'] as String?,
+  );
 }
 
 class WorkerQuestion {
@@ -169,22 +177,86 @@ class WorkerQuestion {
     required this.repliedAt,
   });
 
-  bool get hasManagerReply => managerReply != null && managerReply!.trim().isNotEmpty;
+  bool get hasManagerReply =>
+      managerReply != null && managerReply!.trim().isNotEmpty;
 
   factory WorkerQuestion.fromJson(Map<String, dynamic> json) => WorkerQuestion(
-        questionId: json['question_id'] as String,
-        zone: json['zone'] as String?,
-        text: (json['text'] as String?) ?? '',
-        imageUrl: json['image_url'] as String?,
-        status: (json['status'] as String?) ?? 'pending',
-        llmAnswer: json['llm_answer'] as String?,
-        llmGrounded: json['llm_grounded'] as bool?,
-        citations: ((json['citations'] as List?) ?? const [])
-            .map((e) => Citation.fromJson(e as Map<String, dynamic>))
-            .toList(),
-        managerReply: json['manager_reply'] as String?,
-        createdAt: (json['created_at'] as num?)?.toDouble() ?? 0,
-        repliedAt: (json['replied_at'] as num?)?.toDouble(),
+    questionId: json['question_id'] as String,
+    zone: json['zone'] as String?,
+    text: (json['text'] as String?) ?? '',
+    imageUrl: json['image_url'] as String?,
+    status: (json['status'] as String?) ?? 'pending',
+    llmAnswer: json['llm_answer'] as String?,
+    llmGrounded: json['llm_grounded'] as bool?,
+    citations: ((json['citations'] as List?) ?? const [])
+        .map((e) => Citation.fromJson(e as Map<String, dynamic>))
+        .toList(),
+    managerReply: json['manager_reply'] as String?,
+    createdAt: (json['created_at'] as num?)?.toDouble() ?? 0,
+    repliedAt: (json['replied_at'] as num?)?.toDouble(),
+  );
+}
+
+class AssistantReply {
+  final String answer;
+  final String intent;
+  final double confidence;
+  final String? model;
+  final bool degraded;
+  final bool requiresConfirmation;
+  final Map<String, dynamic>? action;
+  final List<Citation> citations;
+  final String safetyNote;
+
+  AssistantReply({
+    required this.answer,
+    required this.intent,
+    required this.confidence,
+    required this.model,
+    required this.degraded,
+    required this.requiresConfirmation,
+    required this.action,
+    required this.citations,
+    required this.safetyNote,
+  });
+
+  factory AssistantReply.fromJson(Map<String, dynamic> json) => AssistantReply(
+    answer: (json['answer'] as String?) ?? '',
+    intent: (json['intent'] as String?) ?? 'general',
+    confidence: (json['confidence'] as num?)?.toDouble() ?? 0,
+    model: json['model'] as String?,
+    degraded: json['degraded'] as bool? ?? false,
+    requiresConfirmation: json['requires_confirmation'] as bool? ?? false,
+    action: json['action'] as Map<String, dynamic>?,
+    citations: ((json['citations'] as List?) ?? const [])
+        .map((e) => Citation.fromJson(e as Map<String, dynamic>))
+        .toList(),
+    safetyNote: (json['safety_note'] as String?) ?? 'Advisory only.',
+  );
+}
+
+class MeasurementResult {
+  final double measuredMm;
+  final double? specMm;
+  final double? deviationMm;
+  final bool? withinTolerance;
+  final String limitations;
+
+  MeasurementResult({
+    required this.measuredMm,
+    required this.specMm,
+    required this.deviationMm,
+    required this.withinTolerance,
+    required this.limitations,
+  });
+
+  factory MeasurementResult.fromJson(Map<String, dynamic> json) =>
+      MeasurementResult(
+        measuredMm: (json['measured_mm'] as num).toDouble(),
+        specMm: (json['spec_mm'] as num?)?.toDouble(),
+        deviationMm: (json['deviation_mm'] as num?)?.toDouble(),
+        withinTolerance: json['within_tolerance'] as bool?,
+        limitations: (json['limitations'] as String?) ?? '',
       );
 }
 
@@ -225,15 +297,15 @@ class DirectMessage {
   bool get hasAudio => audioUrl != null && audioUrl!.isNotEmpty;
 
   factory DirectMessage.fromJson(Map<String, dynamic> json) => DirectMessage(
-        messageId: json['message_id'] as String,
-        workerId: json['worker_id'] as String,
-        senderRole: (json['sender_role'] as String?) ?? 'site_manager',
-        senderId: (json['sender_id'] as String?) ?? '',
-        senderName: (json['sender_name'] as String?) ?? '',
-        text: (json['text'] as String?) ?? '',
-        audioUrl: json['audio_url'] as String?,
-        audioSeconds: (json['audio_seconds'] as num?)?.toDouble(),
-        readAt: (json['read_at'] as num?)?.toDouble(),
-        createdAt: (json['created_at'] as num?)?.toDouble() ?? 0,
-      );
+    messageId: json['message_id'] as String,
+    workerId: json['worker_id'] as String,
+    senderRole: (json['sender_role'] as String?) ?? 'site_manager',
+    senderId: (json['sender_id'] as String?) ?? '',
+    senderName: (json['sender_name'] as String?) ?? '',
+    text: (json['text'] as String?) ?? '',
+    audioUrl: json['audio_url'] as String?,
+    audioSeconds: (json['audio_seconds'] as num?)?.toDouble(),
+    readAt: (json['read_at'] as num?)?.toDouble(),
+    createdAt: (json['created_at'] as num?)?.toDouble() ?? 0,
+  );
 }

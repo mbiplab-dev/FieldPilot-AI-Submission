@@ -102,7 +102,7 @@ compliance:
 
 reasoning:
   ollama_host: http://localhost:11434
-  llm_model: llama3.2:3b               # fits 6GB VRAM; configurable
+  llm_model: gemma4:e4b-it-qat         # shared local Gemma brain for RFI and safety assistance
   embed_model: nomic-embed-text        # 768-dim embeddings via Ollama
   qdrant_url: http://localhost:6333
   qdrant_collection: blueprints
@@ -113,6 +113,14 @@ reasoning:
   project_id: riverside
   blueprints_dir: data/blueprints
 
+assistant:
+  # Hands-free, worker-invoked multimodal assistant. Safety detection never waits on this model.
+  enabled: true
+  ollama_host: http://localhost:11434
+  model: gemma4:e4b-it-qat             # 6.1 GB QAT build already suited to the demo laptop
+  timeout_s: 45.0
+  wake_phrase: hey fieldpilot
+
 learning:
   # Feedback labels describe PPE/defect detections, so the fine-tune base is the PPE detector,
   # not the pose model (pose has no PPE classes to correct).
@@ -122,7 +130,10 @@ learning:
   epochs: 20
   # measure-and-gate: only promote fine-tuned weights if mAP50 does not regress
   promote_if_delta_gte: 0.0
-  min_samples: 8                       # refuse to train on a statistically meaningless batch
+  recall_tolerance: 0.01              # never trade away more than one recall point for mAP
+  min_samples: 100                     # incremental updates need enough varied site evidence
+  capture_dir: data/training_captures  # manager-selected phone frames + review metadata
+  site_dataset_dir: data/site_datasets # session-safe YOLO exports ready for audit/train
 
 storage:
   sqlite_path: data/fieldpilot.db      # local event store + offline store-and-forward queue
@@ -172,7 +183,7 @@ llm:
   # fail-open: if Ollama/the model is unavailable, alerts auto-confirm.
   enabled: false                       # set true to gate alerts on the LLM
   ollama_host: http://localhost:11434
-  model: llama3.2:3b                   # small, locally runnable; or moondream / llava:7b for vision
+  model: gemma4:e4b-it-qat             # shared with the worker assistant to avoid another VRAM load
   vision: false                        # true → attach the captured bbox image to the prompt
   timeout_s: 12.0
   # The LLM is NOISE CONTROL, not a safety authority. Two guards, both from measured behaviour:

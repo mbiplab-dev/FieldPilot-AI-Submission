@@ -33,7 +33,11 @@ function detailOf(body: unknown): string | null {
   if (typeof detail === "string") return detail;
   if (Array.isArray(detail)) {
     const first = detail[0];
-    if (first && typeof first === "object" && typeof (first as { msg?: unknown }).msg === "string") {
+    if (
+      first &&
+      typeof first === "object" &&
+      typeof (first as { msg?: unknown }).msg === "string"
+    ) {
       return (first as { msg: string }).msg;
     }
   }
@@ -59,9 +63,30 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     // A 401 means the token is gone or expired server-side — drop it locally too, so every
     // page's session hook sees "signed out" instead of retrying with a dead token forever.
     if (res.status === 401) clearSession();
-    throw new ApiError(res.status, detailOf(body) ?? `${res.status} ${res.statusText || "request failed"}`);
+    throw new ApiError(
+      res.status,
+      detailOf(body) ?? `${res.status} ${res.statusText || "request failed"}`,
+    );
   }
   return body as T;
+}
+
+async function reqBlob(path: string): Promise<Blob> {
+  const headers = new Headers();
+  const token = sessionToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, { cache: "no-store", headers });
+  } catch {
+    throw new ApiError(0, "Backend unreachable — is the API running on :8100?");
+  }
+  if (!res.ok) {
+    if (res.status === 401) clearSession();
+    const text = await res.text();
+    throw new ApiError(res.status, detailOf(text ? parseJson(text) : null) ?? "Image unavailable");
+  }
+  return res.blob();
 }
 
 function jsonInit(method: string, body?: unknown): RequestInit {
@@ -87,14 +112,15 @@ async function edgeGet<T>(path: string): Promise<T> {
     throw new ApiError(0, "Edge server unreachable — is the vision service running on :8000?");
   }
   const text = await res.text();
-  if (!res.ok) throw new ApiError(res.status, `${res.status} ${res.statusText || "request failed"}`);
+  if (!res.ok)
+    throw new ApiError(res.status, `${res.status} ${res.statusText || "request failed"}`);
   return (text ? parseJson(text) : null) as T;
 }
 
-const get = <T,>(path: string) => req<T>(path);
-const post = <T,>(path: string, body?: unknown) => req<T>(path, jsonInit("POST", body));
-const put = <T,>(path: string, body?: unknown) => req<T>(path, jsonInit("PUT", body));
-const del = <T,>(path: string) => req<T>(path, jsonInit("DELETE"));
+const get = <T>(path: string) => req<T>(path);
+const post = <T>(path: string, body?: unknown) => req<T>(path, jsonInit("POST", body));
+const put = <T>(path: string, body?: unknown) => req<T>(path, jsonInit("PUT", body));
+const del = <T>(path: string) => req<T>(path, jsonInit("DELETE"));
 
 type QueryValue = string | number | boolean | undefined | null;
 
@@ -192,6 +218,66 @@ export interface PlatformEvent {
   confidence: number;
   severity: Severity;
   payload: Record<string, unknown>;
+}
+
+/* -------------------------- site dataset capture -------------------------- */
+
+export type CaptureSplit = "train" | "val" | "test";
+export type CaptureReviewStatus = "draft" | "reviewed";
+
+export interface CaptureSession {
+  session_id: string;
+  name: string;
+  split: CaptureSplit;
+  created_at: number;
+  updated_at: number;
+  frame_count: number;
+  reviewed_count: number;
+  draft_count: number;
+}
+
+export interface CaptureBox {
+  box_id: string;
+  class_id: number;
+  label: string;
+  xyxy: [number, number, number, number];
+  confidence: number | null;
+}
+
+export interface CaptureFrame {
+  frame_id: string;
+  session_id: string;
+  review_status: CaptureReviewStatus;
+  captured_at: number;
+  source_worker: string;
+  zone: string | null;
+  width: number;
+  height: number;
+  boxes: CaptureBox[];
+  image_url: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface EdgeCapture {
+  worker_id: string;
+  zone: string | null;
+  display_name: string | null;
+  last_frame_at: number;
+  width: number;
+  height: number;
+  detections: Array<Record<string, unknown>>;
+  jpeg_base64: string;
+}
+
+export interface DatasetExport {
+  export_id: string;
+  output_dir: string;
+  data_yaml: string;
+  images: Record<CaptureSplit, number>;
+  boxes: Record<string, number>;
+  session_ids: string[];
+  note: string;
 }
 
 export interface Rule {
@@ -519,6 +605,33 @@ export const api = {
   feedback: (params: { decision?: FeedbackDecision; event_type?: string; limit?: number } = {}) =>
     get<{ feedback: Feedback[] }>(`/feedback${qs({ ...params, limit: params.limit ?? 500 })}`),
 
+  /* manager-reviewed phone frames → session-safe YOLO dataset */
+  captureClasses: () =>
+    get<{ classes: Array<{ class_id: number; name: string }> }>("/dataset/classes"),
+  captureSessions: () => get<{ sessions: CaptureSession[] }>("/dataset/sessions"),
+  createCaptureSession: (input: { name: string; split: CaptureSplit }) =>
+    post<CaptureSession>("/dataset/sessions", input),
+  captureFrames: (sessionId: string) =>
+    get<{ frames: CaptureFrame[] }>(`/dataset/sessions/${encodeURIComponent(sessionId)}/frames`),
+  workerCapture: (workerId: string) =>
+    edgeGet<EdgeCapture>(`/workers/${encodeURIComponent(workerId)}/capture`),
+  saveCapture: (sessionId: string, snapshot: EdgeCapture) =>
+    post<CaptureFrame>(`/dataset/sessions/${encodeURIComponent(sessionId)}/frames`, {
+      jpeg_base64: snapshot.jpeg_base64,
+      detections: snapshot.detections,
+      source_worker: snapshot.worker_id,
+      zone: snapshot.zone,
+      captured_at: snapshot.last_frame_at,
+    }),
+  reviewCapture: (
+    frameId: string,
+    input: { boxes: CaptureBox[]; review_status: CaptureReviewStatus },
+  ) => put<CaptureFrame>(`/dataset/frames/${encodeURIComponent(frameId)}`, input),
+  captureImage: (frameId: string) =>
+    reqBlob(`/dataset/frames/${encodeURIComponent(frameId)}/image`),
+  exportCaptures: (sessionIds: string[]) =>
+    post<DatasetExport>("/dataset/export", { session_ids: sessionIds }),
+
   /* RFI review queue */
   rfis: (params: { status?: RFIStatus | ""; limit?: number } = {}) =>
     get<{ rfis: RFI[] }>(`/rfis${qs({ status: params.status, limit: params.limit ?? 50 })}`),
@@ -535,7 +648,8 @@ export const api = {
     post<{ enabled: boolean }>("/control/inspection", { enabled }),
 
   /* worker phone cameras — served by the edge, not the backend, so this bypasses `/api` */
-  workerFeeds: () => edgeGet<{ feeds: WorkerCameraFeed[]; stats: WorkerFeedStats }>("/workers/live"),
+  workerFeeds: () =>
+    edgeGet<{ feeds: WorkerCameraFeed[]; stats: WorkerFeedStats }>("/workers/live"),
 
   /* direct messages */
   messageThreads: () => get<{ threads: MessageThread[] }>("/messages/threads"),

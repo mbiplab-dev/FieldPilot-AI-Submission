@@ -25,6 +25,7 @@ Two ingest paths exist, and they are deliberately the *same* pipeline code:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 import struct
@@ -712,11 +713,14 @@ def create_app(cfg: Config, source_kind: str | None = None, file_path: str | Non
                     try:
                         relay = await asyncio.to_thread(
                             render_relay_frame, image, body["detections"])
-                        if relay:
+                        pristine = await asyncio.to_thread(encode_jpeg, image, 92)
+                        if relay and pristine:
                             feeds.publish(origin.worker_id, relay,
                                           width=body["frame"]["width"],
                                           height=body["frame"]["height"],
-                                          hazards=len(body["hazards"]))
+                                          hazards=len(body["hazards"]),
+                                          raw_jpeg=pristine,
+                                          detections=body["detections"])
                     except Exception:  # noqa: BLE001 — a failed relay must not stop detection
                         log.exception("could not relay a frame for %s", origin.worker_id)
 
@@ -769,6 +773,17 @@ def create_app(cfg: Config, source_kind: str | None = None, file_path: str | Non
                 await asyncio.sleep(1 / 15)
 
         return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+    @app.get("/workers/{worker_id}/capture")
+    async def worker_capture(worker_id: str) -> JSONResponse:
+        """Newest pristine phone frame and its model boxes, captured only when requested."""
+
+        snapshot = feeds.capture(worker_id)
+        if snapshot is None:
+            return JSONResponse({"detail": "worker has no capturable frame"}, status_code=404)
+        jpeg = snapshot.pop("jpeg")
+        snapshot["jpeg_base64"] = base64.b64encode(jpeg).decode("ascii")
+        return JSONResponse(snapshot)
 
     @app.get("/offline/status")
     async def offline_status() -> JSONResponse:

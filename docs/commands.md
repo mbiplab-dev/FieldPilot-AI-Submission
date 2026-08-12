@@ -30,10 +30,15 @@ server does not need a speech engine.
 |---|---|---|
 | `make fetch-models` | Download detector weights into `models/` (`ONLY=pose\|ppe\|damage`) | ⏳ |
 | `make val-set-demo` | Generate a **synthetic** demo validation set in `data/val_set` | ⏳ |
+| `make audit-ppe DATA=...` | Check labels, class balance, corrupt files, and split leakage | ✅ |
+| `make train-ppe DATA=... EPOCHS=60` | Site transfer learning with mAP/recall promotion gates | ⏳ |
 
 The demo val set exists to unblock the mAP50 promotion gate on a machine with no real labelled
 data. It is clearly labelled as synthetic — never quote a metric measured against it as a real
 accuracy figure.
+
+Use `train-ppe` for a curated site dataset. The older `make train` target below is the incremental
+supervisor-feedback loop. See [model-training.md](model-training.md) before using either.
 
 ## Infrastructure
 

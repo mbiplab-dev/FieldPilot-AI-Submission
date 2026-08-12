@@ -10,8 +10,8 @@ DOCKER        ?= docker
 COMPOSE       ?= $(DOCKER) compose
 
 .DEFAULT_GOAL := help
-.PHONY: help setup setup-backend setup-frontend doctor \
-        fetch-models val-set-demo \
+.PHONY: help setup setup-backend setup-frontend doctor demo-check \
+        fetch-models fetch-ppe-data prepare-ppe-data val-set-demo audit-ppe train-ppe \
         infra-up infra-down infra-ps infra-logs \
         backend edge edge-synthetic gui frontend frontend-build frontend-install \
         run-all stop-all \
@@ -38,13 +38,33 @@ setup-frontend: ## Install frontend Node dependencies (npm)
 doctor: ## Check the local environment (uv, docker, camera, espeak, python)
 	@scripts/doctor.sh
 
+demo-check: ## Verify hackathon assets: vision weights, Gemma, frontend deps, and environment
+	@uv run python scripts/demo_check.py
+
 # ------------------------------------------------------------------ models & datasets
 
 fetch-models: ## Download the model weights into models/ (pose + PPE); ONLY=pose|ppe|damage
 	$(UV) run python scripts/fetch_models.py $(if $(ONLY),--only $(ONLY),)
 
+fetch-ppe-data: ## Download and extract the licensed public PPE training sources
+	$(UV) run python scripts/fetch_ppe_data.py
+
+prepare-ppe-data: ## Merge/remap sources into the runtime 10-class PPE dataset
+	$(UV) run python scripts/prepare_ppe_dataset.py
+
 val-set-demo: ## Generate a SYNTHETIC demo locked val set in data/val_set (unblocks the mAP50 gate)
 	$(UV) run python scripts/make_val_set.py
+
+audit-ppe: ## Audit a site YOLO dataset before training: make audit-ppe DATA=data/site/data.yaml
+	@test -n "$(DATA)" || (echo "usage: make audit-ppe DATA=/path/to/data.yaml"; exit 2)
+	$(UV) run python scripts/train_ppe.py --data "$(DATA)" --audit-only
+
+train-ppe: ## Transfer-learn PPE weights and gate them: make train-ppe DATA=... EPOCHS=60
+	@test -n "$(DATA)" || (echo "usage: make train-ppe DATA=/path/to/data.yaml [EPOCHS=60]"; exit 2)
+	$(UV) run python scripts/train_ppe.py --data "$(DATA)" \
+		$(if $(EPOCHS),--epochs $(EPOCHS),) \
+		$(if $(BATCH),--batch $(BATCH),) \
+		$(if $(WORKERS),--workers $(WORKERS),)
 
 # ------------------------------------------------------------------ infrastructure
 
@@ -105,8 +125,12 @@ inspect-status: ## Show current inspection mode state
 	curl -s http://localhost:$(BACKEND_PORT)/control/inspection && echo
 
 llm-pull: ## Pull the LLM + embedding models (alert verdicts, RFI drafting, blueprint search)
-	docker compose exec -T ollama ollama pull llama3.2:3b
-	docker compose exec -T ollama ollama pull nomic-embed-text
+	@if command -v ollama >/dev/null 2>&1; then \
+		ollama pull gemma4:e4b-it-qat && ollama pull nomic-embed-text; \
+	else \
+		docker compose exec -T ollama ollama pull gemma4:e4b-it-qat && \
+		docker compose exec -T ollama ollama pull nomic-embed-text; \
+	fi
 
 # ------------------------------------------------------------------ RAG & learning loop
 
@@ -163,7 +187,7 @@ demo-events: ## Post sample events (PPE + proximity + crack + measurement) for a
 # ------------------------------------------------------------------ quality & dev
 
 test: ## Run the full backend test suite
-	$(UV) run pytest tests -q
+	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 $(UV) run pytest -p pytest_asyncio.plugin tests -q
 
 test-frontend: ## Type-check the frontend (tsc)
 	cd frontend && npx tsc --noEmit

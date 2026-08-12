@@ -63,6 +63,7 @@ class LearningService:
         output_dir: str = "models/finetuned",
         epochs: int = 20,
         promote_if_delta_gte: float = 0.0,
+        recall_tolerance: float = 0.01,
         min_samples: int = 8,
     ) -> None:
         self._table = store.table(LEARNING_RUNS_TABLE)
@@ -72,6 +73,7 @@ class LearningService:
         self.output_dir = output_dir
         self.epochs = epochs
         self.promote_if_delta_gte = promote_if_delta_gte
+        self.recall_tolerance = recall_tolerance
         self.min_samples = min_samples
         self._running: asyncio.Task[None] | None = None
 
@@ -186,9 +188,10 @@ class LearningService:
         data_yaml = summary.data_yaml
 
         # 1. baseline on the LOCKED val set
-        map50_before = _map50(YOLO(str(base_path)).val(
+        metrics_before = _detection_metrics(YOLO(str(base_path)).val(
             data=data_yaml, split="val", verbose=False, plots=False,
         ))
+        map50_before = metrics_before["map50"]
         log.info("run %s baseline mAP50=%.4f", run_id, map50_before)
 
         # 2. fine-tune
@@ -203,14 +206,21 @@ class LearningService:
             raise RuntimeError(f"training produced no weights at {best}")
 
         # 3. candidate on the SAME locked val set
-        map50_after = _map50(YOLO(str(best)).val(
+        metrics_after = _detection_metrics(YOLO(str(best)).val(
             data=data_yaml, split="val", verbose=False, plots=False,
         ))
+        map50_after = metrics_after["map50"]
         delta = map50_after - map50_before
         log.info("run %s candidate mAP50=%.4f (delta %+.4f)", run_id, map50_after, delta)
 
         # 4. the gate
-        promoted = delta >= self.promote_if_delta_gte
+        gate_reasons = _promotion_reasons(
+            metrics_before,
+            metrics_after,
+            min_map50_delta=self.promote_if_delta_gte,
+            recall_tolerance=self.recall_tolerance,
+        )
+        promoted = not gate_reasons
         weights_path = None
         if promoted:
             promoted_to = Path(self.output_dir) / f"promoted_{Path(base).stem}.pt"
@@ -220,8 +230,7 @@ class LearningService:
             message = (f"promoted: mAP50 {map50_before:.4f} → {map50_after:.4f} "
                        f"(delta {delta:+.4f} ≥ {self.promote_if_delta_gte})")
         else:
-            message = (f"NOT promoted: mAP50 {map50_before:.4f} → {map50_after:.4f} "
-                       f"(delta {delta:+.4f} < {self.promote_if_delta_gte}) — regression recorded")
+            message = "NOT promoted: " + "; ".join(gate_reasons)
         log.info("run %s %s", run_id, message)
 
         return {
@@ -230,6 +239,9 @@ class LearningService:
             "map50_before": round(map50_before, 6),
             "map50_after": round(map50_after, 6),
             "delta": round(delta, 6),
+            "metrics_before": metrics_before,
+            "metrics_after": metrics_after,
+            "gate_reasons": gate_reasons,
             "promoted": promoted,
             "weights_path": weights_path,
             "message": message,
@@ -256,3 +268,51 @@ def _map50(metrics: Any) -> float:
         if key in results:
             return float(results[key])
     raise RuntimeError(f"could not read mAP50 from metrics: {type(metrics).__name__}")
+
+
+def _detection_metrics(metrics: Any) -> dict[str, float]:
+    """Read the four detector metrics used by the safety promotion gate."""
+
+    box = getattr(metrics, "box", None)
+    values = {
+        "precision": getattr(box, "mp", None),
+        "recall": getattr(box, "mr", None),
+        "map50": getattr(box, "map50", None),
+        "map50_95": getattr(box, "map", None),
+    }
+    results = getattr(metrics, "results_dict", None) or {}
+    fallbacks = {
+        "precision": ("metrics/precision(B)", "metrics/precision"),
+        "recall": ("metrics/recall(B)", "metrics/recall"),
+        "map50": ("metrics/mAP50(B)", "metrics/mAP50", "mAP50"),
+        "map50_95": ("metrics/mAP50-95(B)", "metrics/mAP50-95", "mAP50-95"),
+    }
+    for name, keys in fallbacks.items():
+        if values[name] is None:
+            values[name] = next((results[key] for key in keys if key in results), None)
+        if values[name] is None:
+            raise RuntimeError(f"could not read {name} from metrics: {type(metrics).__name__}")
+    return {name: round(float(value), 6) for name, value in values.items()}
+
+
+def _promotion_reasons(
+    before: dict[str, float],
+    after: dict[str, float],
+    *,
+    min_map50_delta: float,
+    recall_tolerance: float,
+) -> list[str]:
+    reasons: list[str] = []
+    delta = after["map50"] - before["map50"]
+    if delta < min_map50_delta:
+        reasons.append(f"mAP50 delta {delta:+.4f} < {min_map50_delta:+.4f}")
+    if after["map50_95"] < before["map50_95"]:
+        reasons.append(
+            f"mAP50-95 regressed {before['map50_95']:.4f} → {after['map50_95']:.4f}"
+        )
+    if after["recall"] < before["recall"] - recall_tolerance:
+        reasons.append(
+            f"recall regressed {before['recall']:.4f} → {after['recall']:.4f} "
+            f"(tolerance {recall_tolerance:.4f})"
+        )
+    return reasons

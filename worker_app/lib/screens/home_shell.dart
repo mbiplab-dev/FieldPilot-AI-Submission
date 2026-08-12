@@ -4,7 +4,7 @@ import 'package:provider/provider.dart';
 import '../core/live_feed.dart';
 import '../core/session.dart';
 import 'alerts_tab.dart';
-import 'ask_tab.dart';
+import 'assistant_tab.dart';
 import 'camera_tab.dart';
 import 'messages_tab.dart';
 import 'report_tab.dart';
@@ -41,7 +41,7 @@ class _HomeShellState extends State<HomeShell> {
     CameraTab(),
     ZoneTab(),
     MessagesTab(),
-    AskTab(),
+    AssistantTab(),
     ReportTab(),
   ];
 
@@ -100,21 +100,42 @@ class _HomeShellState extends State<HomeShell> {
         selectedIndex: _index,
         onDestinationSelected: _select,
         destinations: [
-          const NavigationDestination(icon: Icon(Icons.notifications_outlined),
-              selectedIcon: Icon(Icons.notifications), label: 'Alerts'),
-          const NavigationDestination(icon: Icon(Icons.videocam_outlined),
-              selectedIcon: Icon(Icons.videocam), label: 'Camera'),
-          const NavigationDestination(icon: Icon(Icons.map_outlined),
-              selectedIcon: Icon(Icons.map), label: 'Zone'),
+          const NavigationDestination(
+            icon: Icon(Icons.notifications_outlined),
+            selectedIcon: Icon(Icons.notifications),
+            label: 'Alerts',
+          ),
+          const NavigationDestination(
+            icon: Icon(Icons.videocam_outlined),
+            selectedIcon: Icon(Icons.videocam),
+            label: 'Camera',
+          ),
+          const NavigationDestination(
+            icon: Icon(Icons.map_outlined),
+            selectedIcon: Icon(Icons.map),
+            label: 'Zone',
+          ),
           NavigationDestination(
-            icon: _MessagesIcon(unread: _unread, icon: Icons.chat_bubble_outline),
-            selectedIcon: _MessagesIcon(unread: _unread, icon: Icons.chat_bubble),
+            icon: _MessagesIcon(
+              unread: _unread,
+              icon: Icons.chat_bubble_outline,
+            ),
+            selectedIcon: _MessagesIcon(
+              unread: _unread,
+              icon: Icons.chat_bubble,
+            ),
             label: 'Messages',
           ),
-          const NavigationDestination(icon: Icon(Icons.forum_outlined),
-              selectedIcon: Icon(Icons.forum), label: 'Ask'),
-          const NavigationDestination(icon: Icon(Icons.campaign_outlined),
-              selectedIcon: Icon(Icons.campaign), label: 'Report'),
+          const NavigationDestination(
+            icon: Icon(Icons.record_voice_over_outlined),
+            selectedIcon: Icon(Icons.record_voice_over),
+            label: 'Pilot',
+          ),
+          const NavigationDestination(
+            icon: Icon(Icons.campaign_outlined),
+            selectedIcon: Icon(Icons.campaign),
+            label: 'Report',
+          ),
         ],
       ),
     );

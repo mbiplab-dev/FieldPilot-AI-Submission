@@ -7,6 +7,7 @@ view the site manager can watch.
 
 from __future__ import annotations
 
+import base64
 import struct
 import time
 
@@ -113,6 +114,23 @@ def test_only_the_newest_frame_is_kept():
     for payload in (b"one", b"two", b"three"):
         reg.publish("w-1", payload, width=10, height=10)
     assert reg.frame("w-1") == b"three"
+
+
+def test_capture_keeps_pristine_pixels_and_a_detection_copy():
+    reg = FeedRegistry()
+    reg.open("w-1", zone="zone-a")
+    detections = [{"class": "person", "box": [1, 2, 8, 9]}]
+    reg.publish(
+        "w-1", b"annotated", width=10, height=10,
+        raw_jpeg=b"pristine", detections=detections,
+    )
+    detections[0]["class"] = "mutated"
+
+    capture = reg.capture("w-1")
+    assert capture is not None
+    assert capture["jpeg"] == b"pristine"
+    assert capture["detections"] == [{"class": "person", "box": [1, 2, 8, 9]}]
+    assert "raw_jpeg" not in reg.get("w-1")
 
 
 def test_feeds_are_listed_most_recently_active_first():
@@ -286,6 +304,22 @@ def test_an_identified_phone_stream_becomes_a_watchable_feed(edge):
             assert "multipart/x-mixed-replace" in relay.headers["content-type"]
             chunk = next(relay.iter_bytes())
             assert b"--frame" in chunk and b"image/jpeg" in chunk
+
+
+def test_an_identified_phone_exposes_an_on_demand_pristine_capture(edge):
+    with edge.websocket_connect("/ws/video?worker_id=w-1&zone=zone-a&name=Ravi") as sock:
+        sock.send_bytes(_jpeg())
+        _recv(sock)
+
+        response = edge.get("/workers/w-1/capture")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["worker_id"] == "w-1"
+        assert body["zone"] == "zone-a"
+        assert body["width"] == 96 and body["height"] == 64
+        assert base64.b64decode(body["jpeg_base64"]).startswith(b"\xff\xd8")
+
+    assert edge.get("/workers/w-1/capture").status_code == 404
 
 
 def test_a_raw_phone_frame_drives_the_socket_end_to_end(edge):

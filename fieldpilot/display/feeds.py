@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import threading
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -42,6 +43,8 @@ class WorkerFeed:
     width: int = 0
     height: int = 0
     jpeg: bytes | None = None
+    raw_jpeg: bytes | None = None
+    detections: list[dict[str, Any]] = field(default_factory=list)
 
     def describe(self, *, now: float | None = None, stale_after_s: float = DEFAULT_STALE_AFTER_S) -> dict[str, Any]:
         """JSON-safe summary. Excludes the frame bytes — those go over the MJPEG route."""
@@ -93,8 +96,9 @@ class FeedRegistry:
             return feed
 
     def publish(self, worker_id: str, jpeg: bytes, *, width: int, height: int,
-                hazards: int = 0) -> None:
-        """Record the newest annotated frame for `worker_id`."""
+                hazards: int = 0, raw_jpeg: bytes | None = None,
+                detections: list[dict[str, Any]] | None = None) -> None:
+        """Record the newest annotated frame plus an optional pristine capture candidate."""
 
         now = time.time()
         with self._lock:
@@ -109,6 +113,10 @@ class FeedRegistry:
                     instant = 1.0 / gap
                     feed.fps = instant if feed.fps == 0 else (feed.fps * 0.7 + instant * 0.3)
             feed.jpeg = jpeg
+            if raw_jpeg is not None:
+                feed.raw_jpeg = raw_jpeg
+            if detections is not None:
+                feed.detections = deepcopy(detections)
             feed.last_frame_at = now
             feed.frames += 1
             feed.hazards += int(hazards)
@@ -129,6 +137,19 @@ class FeedRegistry:
         with self._lock:
             feed = self._feeds.get(worker_id)
             return feed.describe(stale_after_s=self.stale_after_s) if feed else None
+
+    def capture(self, worker_id: str) -> dict[str, Any] | None:
+        """A consistent pristine frame + draft detections for an intentional manager capture."""
+
+        with self._lock:
+            feed = self._feeds.get(worker_id)
+            if feed is None or feed.raw_jpeg is None:
+                return None
+            return {
+                **feed.describe(stale_after_s=self.stale_after_s),
+                "jpeg": bytes(feed.raw_jpeg),
+                "detections": deepcopy(feed.detections),
+            }
 
     def list(self) -> list[dict[str, Any]]:
         """Every known feed, most recently active first."""

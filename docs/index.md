@@ -10,6 +10,7 @@ is; these files say how it works, how to run it, and what is and is not built.
 | [setup.md](setup.md) | Install, run the three services, connect a phone, troubleshooting |
 | [commands.md](commands.md) | Every `make` target, what it does, and which are destructive |
 | [architecture.md](architecture.md) | The event chain and why it is the one inviolable rule |
+| [model-training.md](model-training.md) | Pretrained model provenance and site transfer learning |
 
 ## How the system is built
 

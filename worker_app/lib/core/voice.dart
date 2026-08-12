@@ -52,7 +52,9 @@ class Voice extends ChangeNotifier {
 
     try {
       await _tts.setLanguage('en-US');
-      await _tts.setSpeechRate(0.5); // flutter_tts uses 0..1 on Android; 0.5 is normal pace
+      await _tts.setSpeechRate(
+        0.5,
+      ); // flutter_tts uses 0..1 on Android; 0.5 is normal pace
       await _tts.setVolume(1.0);
       await _tts.setPitch(1.0);
       // Without this, `speak()` returns before the utterance finishes and `awaitSpeakCompletion`
@@ -88,14 +90,27 @@ class Voice extends ChangeNotifier {
   }
 
   /// Speak a sample so the worker can confirm they will actually hear an alert.
-  Future<void> speakSample() =>
-      _say('Stop work. Rebar spacing is 40 millimetres above spec.', interrupt: true);
+  Future<void> speakSample() => _say(
+    'Stop work. Rebar spacing is 40 millimetres above spec.',
+    interrupt: true,
+  );
+
+  /// Speak a worker-invoked assistant response. Unlike ambient medium/low alerts this is never
+  /// queued: the worker asked for it and expects the next sentence to be the answer.
+  Future<void> speakAssistant(String text) async {
+    if (!_enabled || !_ready || text.trim().isEmpty) return;
+    await _say(text.trim(), interrupt: true);
+  }
 
   /// Announce an alert once.
   ///
   /// Returns what happened so callers (and the UI) can tell a deliberate drop from a silent
   /// failure. See the class doc for the priority policy.
-  Future<VoiceOutcome> announce(String key, String? sentence, String? severity) async {
+  Future<VoiceOutcome> announce(
+    String key,
+    String? sentence,
+    String? severity,
+  ) async {
     final text = (sentence ?? '').trim();
     // Checked before the dedup key is recorded, so an empty payload does not burn the key and
     // block the real sentence if it arrives later.

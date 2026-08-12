@@ -21,6 +21,12 @@ data/val_set/*
 data/alerts/
 # photos workers upload with questions and manual hazard reports — user-submitted content
 data/uploads/
+# Public training corpora and generated merged datasets are downloaded locally. Keep only the
+# acquisition/preparation code and provenance documentation in Git.
+data/training_sources/
+data/training/
+data/training_captures/
+data/site_datasets/
 models/*.pt
 models/*.tflite
 models/*.onnx
@@ -29,6 +35,8 @@ models/*.onnx
 /*.onnx
 models/*.yaml
 models/finetuned/
+# Ultralytics validation/training commands use this default when no project path is supplied.
+/runs/
 !**/.gitkeep
 
 # Generated at runtime

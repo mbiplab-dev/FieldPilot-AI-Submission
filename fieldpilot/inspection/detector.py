@@ -65,7 +65,9 @@ class InspectionDetector:
             log.warning("inspection model unavailable (%s) — inspection mode disabled", model_path)
             self._model = None
             self.available = False
-            self.enabled = False
+            # Preserve the operator's requested state. `update()` is already guarded by a missing
+            # model and `set_enabled()` refuses an unavailable one; mutating the request here made
+            # a later hot-loaded/test model remain silently disabled even after it became ready.
 
     def set_enabled(self, enabled: bool) -> bool:
         """Toggle inspection mode. Returns the ACTUAL state (False if model missing)."""
@@ -102,9 +104,12 @@ class InspectionDetector:
         boxes: list[dict] = []
         events: list[HazardEvent] = []
         now = result.frame.ts_monotonic
+        # Read names from the active model as well as the load-time cache. This keeps runtime model
+        # swaps honest: a replacement checkpoint may have a different label map.
+        names = dict(getattr(self._model, "names", None) or self._names)
         for r in preds:
             for b in r.boxes:
-                name = self._names.get(int(b.cls), "defect")
+                name = names.get(int(b.cls), "defect")
                 raw = b.xyxy[0]
                 seq = raw.tolist() if hasattr(raw, "tolist") else raw
                 xyxy = tuple(float(v) for v in seq)

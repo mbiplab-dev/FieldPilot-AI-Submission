@@ -22,6 +22,7 @@ FRONTEND_PID=""
 say()  { printf "\033[36m[run-all]\033[0m %s\n" "$1"; }
 warn() { printf "\033[33m[run-all]\033[0m %s\n" "$1"; }
 die()  { printf "\033[31m[run-all]\033[0m %s\n" "$1" >&2; exit 1; }
+port_busy() { ss -H -ltn "sport = :$1" 2>/dev/null | rg -q .; }
 
 mkdir -p "$PID_DIR"
 
@@ -42,27 +43,67 @@ trap cleanup INT TERM
 
 # ------------------------------------------------------------------ 1. infra
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-    say "starting infra: postgres + redis + qdrant + ollama"
-    docker compose up -d >/dev/null || die "docker compose up failed"
-    INFRA_STARTED=1
+    SERVICES=()
+    USE_POSTGRES=0
+    USE_REDIS=0
 
-    say "waiting for postgres…"
-    for _ in $(seq 1 30); do
-        docker compose exec -T postgres pg_isready -U fieldpilot >/dev/null 2>&1 && break
-        sleep 1
-    done
-    say "waiting for redis…"
-    for _ in $(seq 1 30); do
-        [ "$(docker compose exec -T redis redis-cli ping 2>/dev/null)" = "PONG" ] && break
-        sleep 1
-    done
+    if port_busy 5432; then
+        warn "port 5432 is already in use — using SQLite instead of starting FieldPilot Postgres"
+    else
+        SERVICES+=(postgres)
+        USE_POSTGRES=1
+    fi
+    if port_busy 6379; then
+        warn "port 6379 is already in use — using the in-memory event bus"
+    else
+        SERVICES+=(redis)
+        USE_REDIS=1
+    fi
+    if port_busy 6333; then
+        warn "port 6333 is already in use — not starting FieldPilot Qdrant"
+    else
+        SERVICES+=(qdrant)
+    fi
 
-    export FIELDPILOT_EVENTS__BACKEND=postgres
-    export FIELDPILOT_EVENTS__DATABASE_URL="postgresql+psycopg://fieldpilot:fieldpilot@localhost:5432/fieldpilot"
-    export FIELDPILOT_EVENTS__EVENTS_DB_URL="postgresql+psycopg://fieldpilot:fieldpilot@localhost:5432/fieldpilot"
-    export FIELDPILOT_EVENTS__BUS_BACKEND=redis
-    export FIELDPILOT_EVENTS__REDIS_URL="redis://localhost:6379/0"
-    say "infra healthy — backend will use PostgreSQL + Redis bus"
+    if curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
+        # A developer-installed Ollama already owns :11434 and, unlike a fresh container, may
+        # already hold the multi-gigabyte Gemma model. Starting the compose Ollama here would fail
+        # on the port collision and make a prepared hackathon laptop look broken.
+        say "host Ollama detected — starting available FieldPilot infrastructure"
+    else
+        if port_busy 11434; then
+            warn "port 11434 is occupied by a non-Ollama service — local assistant may be unavailable"
+        else
+            SERVICES+=(ollama)
+        fi
+    fi
+
+    if [ "${#SERVICES[@]}" -gt 0 ]; then
+        docker compose up -d "${SERVICES[@]}" >/dev/null || die "docker compose up failed"
+        INFRA_STARTED=1
+    fi
+
+    if [ "$USE_POSTGRES" = "1" ]; then
+        say "waiting for postgres…"
+        for _ in $(seq 1 30); do
+            docker compose exec -T postgres pg_isready -U fieldpilot >/dev/null 2>&1 && break
+            sleep 1
+        done
+        export FIELDPILOT_EVENTS__BACKEND=postgres
+        export FIELDPILOT_EVENTS__DATABASE_URL="postgresql+psycopg://fieldpilot:fieldpilot@localhost:5432/fieldpilot"
+        export FIELDPILOT_EVENTS__EVENTS_DB_URL="postgresql+psycopg://fieldpilot:fieldpilot@localhost:5432/fieldpilot"
+    fi
+    if [ "$USE_REDIS" = "1" ]; then
+        say "waiting for redis…"
+        for _ in $(seq 1 30); do
+            [ "$(docker compose exec -T redis redis-cli ping 2>/dev/null)" = "PONG" ] && break
+            sleep 1
+        done
+        export FIELDPILOT_EVENTS__BUS_BACKEND=redis
+        export FIELDPILOT_EVENTS__REDIS_URL="redis://localhost:6379/0"
+    fi
+
+    say "infrastructure ready — unavailable services use local fallbacks"
 else
     warn "docker unavailable — backend falls back to SQLite + in-memory bus"
 fi
@@ -128,6 +169,7 @@ say "  ▸ inspection  curl -X POST http://localhost:$BACKEND_PORT/control/inspe
 say "                  -H 'Content-Type: application/json' -d '{\"enabled\":true}'"
 say "  ▸ logs        tail -f $LOG_DIR/backend.log $LOG_DIR/edge.log $LOG_DIR/frontend.log"
 say "  ▸ stop        Ctrl-C   (or: make stop-all)"
+say "  ▸ voice demo  worker app → Pilot → tap beacon → 'Hey FieldPilot, measure this'"
 say "────────────────────────────────────────────────────────────"
 
 # foreground wait — Ctrl-C lands here and triggers cleanup

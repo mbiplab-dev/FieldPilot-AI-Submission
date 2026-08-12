@@ -21,6 +21,8 @@ Exposes the event-driven platform over REST:
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hmac
 import time
 import uuid
@@ -42,10 +44,16 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from fieldpilot.assistant import (
+    AssistantError,
+    AssistantService,
+    MeasurementError,
+    measure_from_points,
+)
 from fieldpilot.auth import (
     SESSIONS_TABLE,
     USERS_TABLE,
@@ -66,7 +74,15 @@ from fieldpilot.events.bus import create_bus, publish_event
 from fieldpilot.events.schema import Event
 from fieldpilot.events.store import create_repository
 from fieldpilot.feedback import FEEDBACK_TABLE, FeedbackService
-from fieldpilot.learning import LEARNING_RUNS_TABLE, LearningService
+from fieldpilot.learning import (
+    CAPTURE_FRAMES_TABLE,
+    CAPTURE_SESSIONS_TABLE,
+    LEARNING_RUNS_TABLE,
+    PPE_CLASSES,
+    CaptureError,
+    CaptureService,
+    LearningService,
+)
 from fieldpilot.llm.verifier import LLMVerifier
 from fieldpilot.logging_.logger import get_logger, setup_logging
 from fieldpilot.notifications.service import TOPIC_DASHBOARD, NotificationService
@@ -128,6 +144,28 @@ class TrainIn(BaseModel):
     base_weights: str | None = None
 
 
+class CaptureSessionIn(BaseModel):
+    name: str
+    split: str = "train"
+
+
+class CaptureFrameIn(BaseModel):
+    jpeg_base64: str
+    detections: list[dict[str, Any]] = []
+    source_worker: str
+    zone: str | None = None
+    captured_at: float | None = None
+
+
+class CaptureReviewIn(BaseModel):
+    boxes: list[dict[str, Any]]
+    review_status: str = "draft"
+
+
+class CaptureExportIn(BaseModel):
+    session_ids: list[str] = []
+
+
 class ReviewIn(BaseModel):
     reviewer: str = "supervisor"
     notes: str = ""
@@ -177,6 +215,15 @@ class QuestionReplyIn(BaseModel):
     reply: str
 
 
+class MeasurementIn(BaseModel):
+    reference_points: list[list[float]]
+    measurement_points: list[list[float]]
+    reference_mm: float
+    spec_mm: float | None = None
+    tolerance_mm: float = 5.0
+    image_size: list[float] | None = None
+
+
 def _question_out(question: dict[str, Any]) -> dict[str, Any]:
     """Wire shape for a question: expose the photo as a URL, never a filesystem path."""
 
@@ -184,6 +231,15 @@ def _question_out(question: dict[str, Any]) -> dict[str, Any]:
     path = out.pop("image_path", None)
     out["image_url"] = f"/uploads/{Path(path).name}" if path else None
     out.setdefault("citations", [])
+    return out
+
+
+def _capture_out(frame: dict[str, Any]) -> dict[str, Any]:
+    """Never reveal the server filesystem path used for a captured training image."""
+
+    out = dict(frame)
+    out.pop("image_path", None)
+    out["image_url"] = f"/dataset/frames/{frame['frame_id']}/image"
     return out
 
 
@@ -250,7 +306,13 @@ def create_app(cfg: Config) -> FastAPI:
         output_dir=str(cfg.get("learning.output_dir", "models/finetuned")),
         epochs=int(cfg.get("learning.epochs", 20)),
         promote_if_delta_gte=float(cfg.get("learning.promote_if_delta_gte", 0.0)),
+        recall_tolerance=float(cfg.get("learning.recall_tolerance", 0.01)),
         min_samples=int(cfg.get("learning.min_samples", 8)),
+    )
+    captures = CaptureService(
+        docs,
+        capture_dir=str(cfg.get("learning.capture_dir", "data/training_captures")),
+        export_dir=str(cfg.get("learning.site_dataset_dir", "data/site_datasets")),
     )
 
     # --- RAG: blueprint retrieval + RFI drafting -------------------------------------
@@ -290,6 +352,14 @@ def create_app(cfg: Config) -> FastAPI:
         uploads_dir=uploads_dir,
         llm_enabled=bool(cfg.get("llm.enabled", False)) or bool(cfg.get("questions.llm", True)),
     )
+    assistant = AssistantService(
+        ollama_host=str(cfg.get("assistant.ollama_host", ollama_host)),
+        model=str(cfg.get("assistant.model", "gemma4:e4b-it-qat")),
+        enabled=bool(cfg.get("assistant.enabled", False)),
+        timeout_s=float(cfg.get("assistant.timeout_s", 45.0)),
+        index=blueprints,
+        project_id=project_id,
+    )
 
     orchestrator = Orchestrator(
         bus=bus, events=events_repo, store=store,
@@ -308,6 +378,7 @@ def create_app(cfg: Config) -> FastAPI:
         await docs.start([
             ZONES_TABLE, FEEDBACK_TABLE, LEARNING_RUNS_TABLE, SETTINGS_TABLE,
             USERS_TABLE, SESSIONS_TABLE, OCCUPANCY_TABLE, QUESTIONS_TABLE, MESSAGES_TABLE,
+            CAPTURE_SESSIONS_TABLE, CAPTURE_FRAMES_TABLE,
         ])
         await zones.start()
         await auth.start(seed=None if cfg.get("auth.seed_demo_users", True) else [])
@@ -457,6 +528,19 @@ def create_app(cfg: Config) -> FastAPI:
         (Path(uploads_dir) / name).write_bytes(data)
         return name
 
+    async def _read_image(upload: UploadFile | None) -> bytes | None:
+        """Read a bounded, ephemeral assistant image without writing it to durable storage."""
+
+        if upload is None or not upload.filename:
+            return None
+        suffix = Path(upload.filename).suffix.lower()
+        if suffix not in _IMAGE_TYPES:
+            raise HTTPException(400, f"unsupported upload type {suffix!r}")
+        data = await upload.read(max_upload + 1)
+        if len(data) > max_upload:
+            raise HTTPException(413, f"upload exceeds the {max_upload // 1024 // 1024} MiB limit")
+        return data or None
+
     # ---------------------------------------------------------------- auth
 
     @app.post("/auth/login")
@@ -557,6 +641,55 @@ def create_app(cfg: Config) -> FastAPI:
             return {"occupancy": None}
         zone = await zones.get(str(current.get("zone_id")))
         return {"occupancy": {**current, "zone_name": (zone or {}).get("name")}}
+
+    # ---------------------------------------------------------------- worker assistant
+
+    @app.get("/assistant/status")
+    async def assistant_status(_: dict[str, Any] = Depends(any_user)):
+        """Whether the configured local Gemma model is ready; never downloads on request."""
+
+        return await assistant.status()
+
+    @app.post("/assistant/query")
+    async def assistant_query(
+        text: str = Form(...),
+        zone: str | None = Form(None),
+        image: UploadFile | None = File(None),
+        user: dict[str, Any] = Depends(worker_only),
+    ):
+        """Answer one wake-word command from text and an optional current-frame photo."""
+
+        worker_id = _worker_id(user)
+        current = await occupancy.current_zone(worker_id)
+        try:
+            reply = await assistant.ask(
+                text,
+                zone=zone or (current or {}).get("zone_id"),
+                worker_id=worker_id,
+                image_bytes=await _read_image(image),
+            )
+        except AssistantError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return reply.to_dict()
+
+    @app.post("/assistant/measure")
+    async def assistant_measure(
+        body: MeasurementIn,
+        _: dict[str, Any] = Depends(worker_only),
+    ):
+        """Calculate a worker-marked, coplanar reference measurement without an LLM."""
+
+        try:
+            return measure_from_points(
+                reference_points=body.reference_points,
+                measurement_points=body.measurement_points,
+                reference_mm=body.reference_mm,
+                spec_mm=body.spec_mm,
+                tolerance_mm=body.tolerance_mm,
+                image_size=body.image_size,
+            )
+        except MeasurementError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     # ---------------------------------------------------------------- zone presence
 
@@ -1228,6 +1361,91 @@ def create_app(cfg: Config) -> FastAPI:
     @app.get("/learning/latest")
     async def latest_learning_run(_: dict[str, Any] = Depends(any_user)):
         return await learning.latest_delta()
+
+    # ------------------------------------------------------ site dataset capture/review
+
+    @app.get("/dataset/classes")
+    async def dataset_classes(_: dict[str, Any] = Depends(manager_only)):
+        return {"classes": [
+            {"class_id": index, "name": name} for index, name in enumerate(PPE_CLASSES)
+        ]}
+
+    @app.get("/dataset/sessions")
+    async def capture_sessions(_: dict[str, Any] = Depends(manager_only)):
+        return {"sessions": await captures.list_sessions()}
+
+    @app.post("/dataset/sessions")
+    async def create_capture_session(
+        body: CaptureSessionIn, _: dict[str, Any] = Depends(manager_only)
+    ):
+        try:
+            return await captures.create_session(name=body.name, split=body.split)
+        except CaptureError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.get("/dataset/sessions/{session_id}/frames")
+    async def capture_frames(session_id: str, _: dict[str, Any] = Depends(manager_only)):
+        try:
+            frames = await captures.list_frames(session_id)
+        except CaptureError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return {"frames": [_capture_out(frame) for frame in frames]}
+
+    @app.post("/dataset/sessions/{session_id}/frames")
+    async def capture_frame(
+        session_id: str,
+        body: CaptureFrameIn,
+        _: dict[str, Any] = Depends(manager_only),
+    ):
+        try:
+            jpeg = base64.b64decode(body.jpeg_base64, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise HTTPException(400, "snapshot image is not valid base64") from exc
+        if len(jpeg) > max_upload:
+            raise HTTPException(413, f"snapshot exceeds the {max_upload // 1024 // 1024} MiB limit")
+        try:
+            frame = await captures.capture_frame(
+                session_id=session_id,
+                jpeg=jpeg,
+                detections=body.detections,
+                source_worker=body.source_worker,
+                zone=body.zone,
+                captured_at=body.captured_at,
+            )
+        except CaptureError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return _capture_out(frame)
+
+    @app.put("/dataset/frames/{frame_id}")
+    async def review_capture_frame(
+        frame_id: str,
+        body: CaptureReviewIn,
+        _: dict[str, Any] = Depends(manager_only),
+    ):
+        try:
+            frame = await captures.update_frame(
+                frame_id, boxes=body.boxes, review_status=body.review_status
+            )
+        except CaptureError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return _capture_out(frame)
+
+    @app.get("/dataset/frames/{frame_id}/image")
+    async def capture_frame_image(frame_id: str, _: dict[str, Any] = Depends(manager_only)):
+        try:
+            path = await captures.image_path(frame_id)
+        except CaptureError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return FileResponse(path, media_type="image/jpeg", filename=f"{frame_id}.jpg")
+
+    @app.post("/dataset/export")
+    async def export_capture_dataset(
+        body: CaptureExportIn, _: dict[str, Any] = Depends(manager_only)
+    ):
+        try:
+            return await captures.export(body.session_ids or None)
+        except CaptureError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @app.get("/learning/runs/{run_id}")
     async def get_learning_run(run_id: str, _: dict[str, Any] = Depends(any_user)):
